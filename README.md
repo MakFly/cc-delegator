@@ -4,7 +4,7 @@
 
 LLM expert subagents for Claude Code. Five specialists that can analyze AND implement—architecture, security, code review, and more.
 
-**Supports:** Anthropic Claude, OpenAI GPT, GLM-4.7, Ollama, Groq, DeepInfra, and any OpenAI/Anthropic-compatible API.
+**Supports:** Anthropic Claude, OpenAI GPT, GLM-4.7, GLM-5, Ollama, Groq, DeepInfra, and any OpenAI/Anthropic-compatible API.
 
 [![License](https://img.shields.io/github/license/MakFly/glm-delegator?v=2)](LICENSE)
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -17,7 +17,7 @@ Claude gains a team of LLM specialists via MCP. Each expert has a distinct speci
 |--------------|----------------|
 | **5 domain experts** | Right specialist for each problem type |
 | **Dual mode** | Experts can analyze (read-only) or implement (write) |
-| **Multi-provider** | Use Claude, GPT-4, GLM, Ollama, or any compatible API |
+| **Multi-provider** | Use Claude, GPT-4, GLM (4.7/5), Ollama, or any compatible API |
 | **Auto-routing** | Claude detects when to delegate based on your request |
 | **Synthesized responses** | Claude interprets LLM output, never raw passthrough |
 | **Multilingual** | Code Review supports EN/FR/CN (中文) |
@@ -159,12 +159,14 @@ Add to `~/.claude.json` (or `~/.claude/settings.json`):
         "--provider", "anthropic-compatible",
         "--base-url", "https://api.z.ai/api/anthropic",
         "--api-key", "$GLM_API_KEY",
-        "--model", "glm-4.7"
+        "--model", "glm-5"
       ]
     }
   }
 }
 ```
+
+> **Note:** Replace `glm-5` with `glm-4.7` if you prefer the previous generation model.
 
 ### Step 4: Restart Claude Code
 
@@ -176,7 +178,7 @@ Restart Claude Code to load the MCP server.
 |----------|------|---------------|
 | **Anthropic** | anthropic-compatible | claude-sonnet-4-20250514 |
 | **OpenAI** | openai-compatible | gpt-4o |
-| **GLM (Z.AI)** | anthropic-compatible | glm-4.7 |
+| **GLM (Z.AI)** | anthropic-compatible | glm-4.7, glm-5 |
 | **Ollama** | openai-compatible | llama3.1 |
 | **Groq** | openai-compatible | llama-3.3-70b-versatile |
 | **DeepInfra** | openai-compatible | deepseek-ai/DeepSeek-V3 |
@@ -264,7 +266,7 @@ Claude: "Based on the analysis, I found 3 issues..."
 | `--provider` | `-p` | `anthropic-compatible` | Provider type |
 | `--base-url` | `-u` | `https://api.z.ai/api/anthropic` | API base URL |
 | `--api-key` | `-k` | `$GLM_API_KEY` | API key |
-| `--model` | `-m` | `glm-4.7` | Model name |
+| `--model` | `-m` | `glm-4.7` | Model name (e.g. glm-4.7, glm-5) |
 | `--api-version` | - | `2023-06-01` | Anthropic API version |
 | `--timeout` | - | `600` | Timeout (seconds) |
 | `--max-tokens` | - | `8192` | Max tokens per response |

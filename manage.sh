@@ -87,7 +87,7 @@ setup_claude_glm_dir() {
     "glm": {
       "provider": "anthropic-compatible",
       "baseUrl": "https://api.z.ai/api/anthropic",
-      "model": "glm-4.7",
+      "model": "glm-5",
       "apiKeyEnv": "GLM_API_KEY"
     },
     "ollama": {
@@ -130,7 +130,7 @@ install_mcp() {
     info "Profils disponibles :"
     echo "  1) claude    - Anthropic Claude (claude-sonnet-4)"
     echo "  2) openai    - OpenAI GPT-4"
-    echo "  3) glm       - GLM-4.7 via Z.AI"
+    echo "  3) glm       - GLM-5 via Z.AI (also supports glm-4.7)"
     echo "  4) ollama    - Ollama local"
     echo "  5) custom    - Configuration personnalisée"
     read -p "$(echo -e ${YELLOW}Choix [1-5, default: 1]: ${NC})" PROFILE_CHOICE

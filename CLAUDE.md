@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Claude Code plugin that provides GLM-4.7 (via Z.AI API) as specialized expert subagents. Five domain experts that can advise OR implement: Architect, Plan Reviewer, Scope Analyst, Code Reviewer (EN/FR/CN), and Security Analyst.
+A Claude Code plugin that provides GLM (4.7/5) (via Z.AI API) as specialized expert subagents. Five domain experts that can advise OR implement: Architect, Plan Reviewer, Scope Analyst, Code Reviewer (EN/FR/CN), and Security Analyst.
 
 ## Development Commands
 
@@ -82,11 +82,11 @@ Every expert can operate in **advisory** (read-only) or **implementation** (work
 | `GLM_API_KEY` | Yes* | - | Your Z.AI API key |
 | `Z_AI_API_KEY` | Yes* | - | Alternative to GLM_API_KEY |
 | `GLM_BASE_URL` | No | `https://api.z.ai/api/anthropic` | Z.AI API endpoint |
-| `GLM_MODEL` | No | `glm-4.7` | GLM model to use |
+| `GLM_MODEL` | No | `glm-4.7` | GLM model to use (glm-4.7 or glm-5) |
 
 ### MCP Server
 
-The MCP server is implemented in `glm_mcp_server.py` and uses the Z.AI Anthropic-compatible API to communicate with GLM-4.7.
+The MCP server is implemented in `glm_mcp_server.py` and uses the Z.AI Anthropic-compatible API to communicate with GLM (4.7/5).
 
 ## Component Relationships
 

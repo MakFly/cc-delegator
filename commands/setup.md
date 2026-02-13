@@ -1,13 +1,13 @@
 ---
 name: setup
-description: Configure glm-delegator with Z.AI GLM-4.7 MCP server
+description: Configure glm-delegator with Z.AI GLM (4.7/5) MCP server
 allowed-tools: Bash, Read, Write, Edit, AskUserQuestion
 timeout: 60000
 ---
 
 # Setup
 
-Configure GLM-4.7 as specialized expert subagents via MCP. Five domain experts that can advise OR implement.
+Configure GLM (4.7/5) as specialized expert subagents via MCP. Five domain experts that can advise OR implement.
 
 ## Step 1: Check Python and Dependencies
 
@@ -150,7 +150,7 @@ Next steps:
 1. Restart Claude Code to load MCP server
 2. Set API key if not already: export GLM_API_KEY="your_key"
 
-Five GLM-4.7 experts available:
+Five GLM experts available:
 
 ┌──────────────────┬─────────────────────────────────────────────┐
 │ Architect        │ "How should I structure this service?"      │

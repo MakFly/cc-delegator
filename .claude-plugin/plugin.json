@@ -1,6 +1,6 @@
 {
   "name": "glm-delegator",
-  "description": "GLM-4.7 expert subagents for Claude Code via Z.AI API. Five specialized experts: Architect, Plan Reviewer, Scope Analyst, Code Reviewer (EN/FR/CN), Security Analyst.",
+  "description": "GLM (4.7/5) expert subagents for Claude Code via Z.AI API. Five specialized experts: Architect, Plan Reviewer, Scope Analyst, Code Reviewer (EN/FR/CN), Security Analyst.",
   "version": "1.0.0",
   "author": {
     "name": "Forked from claude-delegator by Jarrod Watts",
