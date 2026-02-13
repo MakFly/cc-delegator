@@ -39,7 +39,7 @@ User Request → Claude Code → [Match trigger → Select expert]
 
 ### How Delegation Works
 
-1. **Match trigger** - Check `rules/triggers.md` for semantic patterns
+1. **Match trigger** - Check `rules/glm-delegator.md` for semantic patterns
 2. **Select expert** - Choose based on task type
 3. **Build delegation prompt** - Include task, context, mode
 4. **Call MCP tool** - `mcp__glm-delegator__glm_{expert}`
@@ -93,7 +93,6 @@ The MCP server is implemented in `glm_mcp_server.py` and uses the Z.AI Anthropic
 | Component | Purpose | Notes |
 |-----------|---------|-------|
 | `rules/*.md` | When/how to delegate | Installed to `~/.claude/rules/glm-delegator/` |
-| `prompts/*.md` | Expert personalities | For reference; actual prompts in `glm_mcp_server.py` |
 | `commands/*.md` | Slash commands | `/setup`, `/uninstall` |
 | `glm_mcp_server.py` | MCP server implementation | Handles GLM API communication |
 

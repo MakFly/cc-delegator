@@ -57,6 +57,16 @@ When a trigger matches:
 4. **Call** — Use 7-section prompt format (below)
 5. **Synthesize** — Never show raw output; extract insights, apply judgment, verify implementation
 
+## Files Parameter
+
+Always populate `files` when:
+- Reviewing specific code (attach the files being reviewed)
+- Debugging (attach error sources, stack trace files)
+- Refactoring (attach files to be refactored)
+- Security analysis (attach input handlers, auth code)
+
+Omit `files` only for open-ended architecture questions or conceptual discussions.
+
 ## Prompt Format (7 Sections — MANDATORY)
 
 ```
