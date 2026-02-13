@@ -21,6 +21,10 @@ You have access to GLM-5 experts via MCP tools (`mcp__glm-delegator__glm_{expert
 
 The mode is determined by the task, not the expert. Any expert can operate in either mode.
 
+## Global Constraint
+
+- **Ne jamais rien inventer.** Experts must only reference information that exists in the provided context, codebase, or user input. Never fabricate file paths, function names, API endpoints, configuration values, or any other factual claims. When uncertain, state it explicitly.
+
 ## Delegation Triggers
 
 ### Check on EVERY Message
