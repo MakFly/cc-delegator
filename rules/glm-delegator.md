@@ -57,15 +57,42 @@ When a trigger matches:
 4. **Call** — Use 7-section prompt format (below)
 5. **Synthesize** — Never show raw output; extract insights, apply judgment, verify implementation
 
-## Files Parameter
+## Files Parameter — Making Experts See the Code
 
-Always populate `files` when:
-- Reviewing specific code (attach the files being reviewed)
-- Debugging (attach error sources, stack trace files)
-- Refactoring (attach files to be refactored)
-- Security analysis (attach input handlers, auth code)
+GLM experts do NOT have filesystem access. The `files` parameter only passes paths as metadata. To give experts actual code visibility, you MUST include file content in the `context` parameter.
 
-Omit `files` only for open-ended architecture questions or conceptual discussions.
+### Mandatory Workflow
+
+1. **Read the files** yourself (using the Read tool) before calling the expert
+2. **Include the content** in the `context` parameter with file headers
+3. **List the paths** in `files` as metadata (for reference/logging)
+4. **Truncate** if total content exceeds ~50K characters (keep the most relevant sections)
+
+### Context Format for File Content
+
+```
+### File: src/auth/login.ts (lines 45-120)
+\```typescript
+[actual file content here]
+\```
+
+### File: src/middleware/auth.py
+\```python
+[actual file content here]
+\```
+```
+
+### When to Include Files
+
+- **Reviewing code**: Include the files being reviewed
+- **Debugging**: Include error sources, stack trace files
+- **Refactoring**: Include files to be refactored
+- **Security analysis**: Include input handlers, auth code
+
+### When to Omit Files
+
+- Open-ended architecture questions or conceptual discussions
+- Questions that don't reference specific code
 
 ## Prompt Format (7 Sections — MANDATORY)
 

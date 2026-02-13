@@ -684,7 +684,7 @@ Now respond as the {expert} expert following the response format specified above
 
         except Exception as e:
             self.logger.error(f"Error calling provider: {e}")
-            return f"[Error calling provider: {str(e)}]"
+            raise RuntimeError(f"[GLM Expert Error] expert={expert}, error={str(e)}")
 
     async def list_tools(self):
         """List available MCP tools."""
@@ -716,7 +716,7 @@ Now respond as the {expert} expert following the response format specified above
                         "files": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Relevant files to include",
+                            "description": "List of file paths included in context (metadata only - include actual content in the context parameter)",
                             "default": []
                         }
                     },
@@ -736,15 +736,28 @@ Now respond as the {expert} expert following the response format specified above
         context = arguments.get("context", "")
         files = arguments.get("files", [])
 
-        result = await self.call_expert(expert, task, mode, context, files)
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": result
-                }
-            ]
-        }
+        try:
+            result = await self.call_expert(expert, task, mode, context, files)
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": result
+                    }
+                ]
+            }
+        except Exception as e:
+            error_msg = str(e)
+            self.logger.error(f"Tool call failed: {error_msg}")
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": error_msg
+                    }
+                ],
+                "isError": True
+            }
 
 
 # =============================================================================
@@ -817,29 +830,33 @@ async def main():
         logger.info("LLM Delegator MCP Server starting...")
 
     # Process stdin/stdout (wait for client to initiate handshake)
-    while True:
-        try:
-            line = await asyncio.get_event_loop().run_in_executor(
-                None, sys.stdin.readline
-            )
-            if not line:
-                break
+    try:
+        while True:
+            try:
+                line = await asyncio.get_event_loop().run_in_executor(
+                    None, sys.stdin.readline
+                )
+                if not line:
+                    break
 
-            message = json.loads(line.strip())
-            response = await handle_message(message)
+                message = json.loads(line.strip())
+                response = await handle_message(message)
 
-            # Only send response for requests (with id), not notifications
-            if "id" in message and response is not None:
-                response["id"] = message["id"]
-                response["jsonrpc"] = "2.0"
-                await send_jsonrpc(response)
+                # Only send response for requests (with id), not notifications
+                if "id" in message and response is not None:
+                    response["id"] = message["id"]
+                    response["jsonrpc"] = "2.0"
+                    await send_jsonrpc(response)
 
-        except json.JSONDecodeError as e:
-            if logger:
-                logger.error(f"JSON decode error: {e}")
-        except Exception as e:
-            if logger:
-                logger.error(f"Error processing message: {e}")
+            except json.JSONDecodeError as e:
+                if logger:
+                    logger.error(f"JSON decode error: {e}")
+            except Exception as e:
+                if logger:
+                    logger.error(f"Error processing message: {e}")
+    finally:
+        if server:
+            await server.stop()
 
 
 async def send_jsonrpc(data: dict):

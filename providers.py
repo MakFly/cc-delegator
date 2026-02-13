@@ -8,6 +8,7 @@ Supports multiple LLM backends through a unified interface:
 - Easy to extend for other providers
 """
 
+import asyncio
 import os
 import logging
 from abc import ABC, abstractmethod
@@ -77,6 +78,8 @@ class BaseProvider(ABC):
 
     async def start(self):
         """Initialize the HTTP client."""
+        if self._client is not None:
+            return  # Already initialized
         headers = self._build_headers()
         self._client = httpx.AsyncClient(
             base_url=self.config.baseUrl,
@@ -112,6 +115,45 @@ class BaseProvider(ABC):
                 f"API key required but not found. "
                 f"Set environment variable: {self.config.apiKeyEnv}"
             )
+
+    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 529}
+    MAX_RETRIES = 3
+    RETRY_DELAYS = [1.5, 2.5, 4.5]
+
+    async def _call_with_retry(self, request_func):
+        """
+        Execute an HTTP request with exponential backoff retry.
+
+        Args:
+            request_func: Async callable that performs the HTTP request
+                          and returns an httpx.Response.
+
+        Returns:
+            httpx.Response on success.
+
+        Raises:
+            The last httpx.HTTPStatusError if all retries are exhausted.
+        """
+        last_exception = None
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                response = await request_func()
+                response.raise_for_status()
+                return response
+            except httpx.HTTPStatusError as e:
+                last_exception = e
+                if e.response.status_code not in self.RETRYABLE_STATUS_CODES:
+                    raise  # Non-retryable, fail immediately
+                if attempt < self.MAX_RETRIES - 1:
+                    delay = self.RETRY_DELAYS[attempt]
+                    logger.warning(
+                        f"Retryable error {e.response.status_code}, "
+                        f"attempt {attempt + 1}/{self.MAX_RETRIES}, "
+                        f"retrying in {delay}s..."
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    raise  # Last attempt, propagate
 
 
 # =============================================================================
@@ -162,8 +204,9 @@ class OpenAICompatibleProvider(BaseProvider):
         logger.debug(f"Calling {self.config.baseUrl}/chat/completions")
 
         try:
-            response = await self._client.post("/chat/completions", json=payload)
-            response.raise_for_status()
+            response = await self._call_with_retry(
+                lambda: self._client.post("/chat/completions", json=payload)
+            )
             data = response.json()
 
             # Extract response text
@@ -180,7 +223,6 @@ class OpenAICompatibleProvider(BaseProvider):
         except httpx.HTTPStatusError as e:
             error_body = e.response.text
             logger.error(f"OpenAI-compatible API error: {e.response.status_code} - {error_body}")
-            # Provide helpful error messages
             if e.response.status_code == 429:
                 raise RuntimeError(f"Rate limit exceeded or insufficient credits. Check your Z.AI balance. Details: {error_body}")
             elif e.response.status_code == 401:
@@ -242,13 +284,17 @@ class AnthropicCompatibleProvider(BaseProvider):
         logger.debug(f"Calling {self.config.baseUrl}/v1/messages")
 
         try:
-            response = await self._client.post("/v1/messages", json=payload)
-            response.raise_for_status()
+            response = await self._call_with_retry(
+                lambda: self._client.post("/v1/messages", json=payload)
+            )
             data = response.json()
 
             # Extract response text
             text = data["content"][0]["text"]
-            tokens_used = data.get("usage", {}).get("input_tokens") + data.get("usage", {}).get("output_tokens")
+            usage = data.get("usage", {})
+            input_t = usage.get("input_tokens") or 0
+            output_t = usage.get("output_tokens") or 0
+            tokens_used = input_t + output_t
 
             return ProviderResponse(
                 text=text,
