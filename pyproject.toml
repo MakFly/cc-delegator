@@ -1,0 +1,17 @@
+[project]
+name = "glm-delegator"
+version = "2.0.0"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["providers", "glm_mcp_server"]
+omit = ["tests/*", ".venv/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
