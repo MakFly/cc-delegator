@@ -359,7 +359,7 @@ Claude: "Based on the analysis, I found 3 issues..."
 | `--provider` | `-p` | `anthropic-compatible` | Provider type |
 | `--base-url` | `-u` | `https://api.z.ai/api/anthropic` | API base URL |
 | `--api-key` | `-k` | `$GLM_API_KEY` | API key |
-| `--model` | `-m` | `glm-4.7` | Model name (e.g. glm-4.7, glm-5) |
+| `--model` | `-m` | `glm-5` | Model name (e.g. glm-5, glm-4.7) |
 | `--api-version` | - | `2023-06-01` | Anthropic API version |
 | `--timeout` | - | `600` | Timeout (seconds) |
 | `--max-tokens` | - | `8192` | Max tokens per response |

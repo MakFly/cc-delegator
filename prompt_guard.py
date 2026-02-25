@@ -81,6 +81,8 @@ class PromptQualityGuard:
         suggestions = []
 
         files = files or []
+        # WARNING: os.getcwd() fallback may not match the user's intended base directory
+        # in server contexts. Callers should provide an explicit working_dir.
         working_dir = working_dir or os.getcwd()
 
         # 1. Task validation
@@ -106,6 +108,13 @@ class PromptQualityGuard:
 
                 # Handle relative vs absolute paths
                 full_path = f if os.path.isabs(f) else os.path.join(working_dir, f)
+                full_path = os.path.realpath(full_path)
+
+                # Prevent path traversal outside working_dir
+                real_working_dir = os.path.realpath(working_dir)
+                if not full_path.startswith(real_working_dir + os.sep) and full_path != real_working_dir:
+                    errors.append(f"Path traversal detected: {f} resolves outside working directory")
+                    continue
 
                 if not os.path.exists(full_path):
                     errors.append(f"File not found: {f}")
@@ -116,7 +125,7 @@ class PromptQualityGuard:
         detected_patterns = []
 
         for pattern, description in self.HALLUCINATION_PATTERNS:
-            matches = re.findall(pattern, combined_text, re.IGNORECASE)
+            matches = re.findall(pattern, combined_text)
             if matches:
                 detected_patterns.append(f"'{matches[0]}' ({description})")
 

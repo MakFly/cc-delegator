@@ -48,30 +48,31 @@ class TestPromptQualityGuard:
 
     def test_validate_file_exists(self, guard):
         """Test validation of existing files."""
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".py") as f:
-            f.write(b"# test file")
-            temp_path = f.name
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_file = os.path.join(tmpdir, "test.py")
+            with open(test_file, "w") as f:
+                f.write("# test file")
 
-        try:
             result = guard.validate(
                 "Review this file",
-                files=[temp_path]
+                files=[test_file],
+                working_dir=tmpdir
             )
 
             assert result.is_valid
             assert not any("not found" in e for e in result.errors)
-        finally:
-            os.unlink(temp_path)
 
     def test_validate_file_not_found(self, guard):
         """Test validation fails for non-existent files."""
-        result = guard.validate(
-            "Review this file",
-            files=["/nonexistent/path/to/file.py"]
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = guard.validate(
+                "Review this file",
+                files=["nonexistent_file.py"],
+                working_dir=tmpdir
+            )
 
-        assert not result.is_valid
-        assert any("not found" in e.lower() for e in result.errors)
+            assert not result.is_valid
+            assert any("not found" in e.lower() for e in result.errors)
 
     def test_validate_hallucination_patterns(self, guard):
         """Test detection of uncertainty/hallucination signals."""

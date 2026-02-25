@@ -9,6 +9,7 @@ Supports multiple LLM backends through a unified interface:
 """
 
 import asyncio
+import json
 import os
 import logging
 from abc import ABC, abstractmethod
@@ -34,9 +35,12 @@ class BackendConfig:
     apiVersion: Optional[str] = None
     timeout: int = 600
     maxTokens: int = 8192
+    api_key: Optional[str] = None  # Direct key, priority over env
 
     def get_api_key(self) -> str:
-        """Get API key from environment variable."""
+        """Get API key from direct config or environment variable."""
+        if self.api_key is not None:
+            return self.api_key
         if not self.apiKeyEnv:
             return ""
         return os.environ.get(self.apiKeyEnv, "")
@@ -51,7 +55,8 @@ class BackendConfig:
             model=data.get("model", ""),
             apiVersion=data.get("apiVersion"),
             timeout=data.get("timeout", 600),
-            maxTokens=data.get("maxTokens", 8192)
+            maxTokens=data.get("maxTokens", 8192),
+            api_key=data.get("api_key")
         )
 
 
@@ -92,6 +97,7 @@ class BaseProvider(ABC):
         """Close the HTTP client."""
         if self._client:
             await self._client.aclose()
+            self._client = None
 
     @abstractmethod
     def _build_headers(self) -> Dict[str, str]:
@@ -134,18 +140,16 @@ class BaseProvider(ABC):
         Raises:
             The last httpx.HTTPStatusError if all retries are exhausted.
         """
-        last_exception = None
         for attempt in range(self.MAX_RETRIES):
             try:
                 response = await request_func()
                 response.raise_for_status()
                 return response
             except httpx.HTTPStatusError as e:
-                last_exception = e
                 if e.response.status_code not in self.RETRYABLE_STATUS_CODES:
                     raise  # Non-retryable, fail immediately
                 if attempt < self.MAX_RETRIES - 1:
-                    delay = self.RETRY_DELAYS[attempt]
+                    delay = self.RETRY_DELAYS[min(attempt, len(self.RETRY_DELAYS) - 1)]
                     logger.warning(
                         f"Retryable error {e.response.status_code}, "
                         f"attempt {attempt + 1}/{self.MAX_RETRIES}, "
@@ -221,13 +225,13 @@ class OpenAICompatibleProvider(BaseProvider):
             )
 
         except httpx.HTTPStatusError as e:
-            error_body = e.response.text
+            error_body = e.response.text[:200]
             logger.error(f"OpenAI-compatible API error: {e.response.status_code} - {error_body}")
             if e.response.status_code == 429:
-                raise RuntimeError(f"Rate limit exceeded or insufficient credits. Check your Z.AI balance. Details: {error_body}")
+                raise RuntimeError("Rate limit exceeded or insufficient credits. Check your Z.AI balance.")
             elif e.response.status_code == 401:
-                raise RuntimeError(f"Invalid API key. Check your Z.AI API key. Details: {error_body}")
-            raise RuntimeError(f"API error {e.response.status_code}: {error_body}")
+                raise RuntimeError("Invalid API key. Check your Z.AI API key.")
+            raise RuntimeError(f"API error {e.response.status_code}")
         except (KeyError, IndexError) as e:
             logger.error(f"Unexpected response format: {e}")
             raise RuntimeError(f"Unexpected API response format: {e}")
@@ -304,13 +308,13 @@ class AnthropicCompatibleProvider(BaseProvider):
             )
 
         except httpx.HTTPStatusError as e:
-            error_body = e.response.text
+            error_body = e.response.text[:200]
             logger.error(f"Anthropic-compatible API error: {e.response.status_code} - {error_body}")
             if e.response.status_code == 429:
-                raise RuntimeError(f"Rate limit exceeded or insufficient credits. Details: {error_body}")
+                raise RuntimeError("Rate limit exceeded or insufficient credits.")
             elif e.response.status_code == 401:
-                raise RuntimeError(f"Invalid API key. Details: {error_body}")
-            raise RuntimeError(f"API error {e.response.status_code}: {error_body}")
+                raise RuntimeError("Invalid API key.")
+            raise RuntimeError(f"API error {e.response.status_code}")
         except (KeyError, IndexError) as e:
             logger.error(f"Unexpected response format: {e}")
             raise RuntimeError(f"Unexpected API response format: {e}")
@@ -351,6 +355,7 @@ class ProviderFactory:
 # Configuration Loader
 # =============================================================================
 
+# NOTE: Currently unused by MCP server (uses CLI args). Kept for future config file support.
 class ConfigLoader:
     """Load and manage backend configuration."""
 
@@ -373,7 +378,7 @@ class ConfigLoader:
 
         try:
             with open(config_path, "r") as f:
-                data = __import__("json").load(f)
+                data = json.load(f)
         except FileNotFoundError:
             logger.warning(f"Config file not found: {config_path}, using environment defaults")
             return cls._from_env(), "default"
@@ -400,7 +405,7 @@ class ConfigLoader:
             provider="anthropic-compatible",
             baseUrl=os.environ.get("GLM_BASE_URL", "https://api.z.ai/api/anthropic"),
             apiKeyEnv="GLM_API_KEY",  # Will try GLM_API_KEY and Z_AI_API_KEY
-            model=os.environ.get("GLM_MODEL", "glm-4.7"),
+            model=os.environ.get("GLM_MODEL", "glm-5"),
             apiVersion="2023-06-01",
             timeout=600,
             maxTokens=8192
@@ -416,7 +421,7 @@ class ConfigLoader:
 
         try:
             with open(config_path, "r") as f:
-                data = __import__("json").load(f)
+                data = json.load(f)
             return data.get("profiles", {})
         except FileNotFoundError:
             return {}

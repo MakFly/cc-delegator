@@ -279,7 +279,7 @@ class TestHandleMessage:
         result = await glm_mcp_server.handle_message({"method": "initialize"})
         assert result["result"]["protocolVersion"] == "2024-11-05"
         assert result["result"]["serverInfo"]["name"] == "llm-delegator"
-        assert result["result"]["serverInfo"]["version"] == "2.0.0"
+        assert result["result"]["serverInfo"]["version"] == "3.0.0"
 
     async def test_handle_notifications_returns_none(self):
         result = await glm_mcp_server.handle_message({"method": "notifications/initialized"})

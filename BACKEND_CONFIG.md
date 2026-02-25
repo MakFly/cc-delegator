@@ -138,7 +138,7 @@ Ajoutez le serveur à votre `~/.claude.json` ou `~/.claude/settings.json` :
 | `--provider` | `-p` | Type de provider | `anthropic-compatible` |
 | `--base-url` | `-u` | URL de base de l'API | `https://api.z.ai/api/anthropic` |
 | `--api-key` | `-k` | Clé API | `$GLM_API_KEY` ou `$Z_AI_API_KEY` |
-| `--model` | `-m` | Nom du modèle (glm-4.7, glm-5...) | `glm-4.7` |
+| `--model` | `-m` | Nom du modèle (glm-5, glm-4.7...) | `glm-5` |
 | `--api-version` | - | Version API (Anthropic) | `2023-06-01` |
 | `--timeout` | - | Timeout en secondes | `600` |
 | `--max-tokens` | - | Tokens max par réponse | `8192` |

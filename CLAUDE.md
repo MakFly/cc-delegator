@@ -82,7 +82,7 @@ Every expert can operate in **advisory** (read-only) or **implementation** (work
 | `GLM_API_KEY` | Yes* | - | Your Z.AI API key |
 | `Z_AI_API_KEY` | Yes* | - | Alternative to GLM_API_KEY |
 | `GLM_BASE_URL` | No | `https://api.z.ai/api/anthropic` | Z.AI API endpoint |
-| `GLM_MODEL` | No | `glm-4.7` | GLM model to use (glm-4.7 or glm-5) |
+| `GLM_MODEL` | No | `glm-5` | GLM model to use (glm-5 with glm-4.7 fallback) |
 
 ### MCP Server
 

@@ -51,14 +51,12 @@ Given a raw prompt, enhance it by:
 ## Output Format
 
 Return ONLY valid JSON (no markdown code blocks, no explanation):
-```json
 {
   "enhanced_task": "The improved task description with clear structure",
   "added_context": "Any context you inferred or structured",
   "suggestions": ["List of suggested improvements for the user"],
   "confidence": 0.85
 }
-```
 
 The confidence score (0.0-1.0) reflects how much you improved the prompt.
 - 1.0: Significant improvement, clear structure added
@@ -122,24 +120,42 @@ Please enhance this prompt following the rules in your system prompt. Return onl
             # Parse JSON response
             result_text = response.text.strip()
 
-            # Remove markdown code blocks if present
-            if result_text.startswith("```"):
+            # Remove markdown code blocks if present (``` or ~~~ fences)
+            if result_text.startswith("```") or result_text.startswith("~~~"):
+                fence = result_text[:3]
                 lines = result_text.split("\n")
                 # Remove first and last line if they're code block markers
-                if lines[0].startswith("```"):
+                if lines[0].startswith(fence):
                     lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
+                if lines and lines[-1].strip().startswith(fence):
                     lines = lines[:-1]
                 result_text = "\n".join(lines).strip()
 
             data = json.loads(result_text)
 
+            # Validate types, fallback to defaults if incorrect
+            enhanced_task = data.get("enhanced_task", task)
+            if not isinstance(enhanced_task, str):
+                enhanced_task = task
+
+            added_context = data.get("added_context", "")
+            if not isinstance(added_context, str):
+                added_context = ""
+
+            suggestions = data.get("suggestions", [])
+            if not isinstance(suggestions, list):
+                suggestions = []
+
+            raw_confidence = data.get("confidence", 0.5)
+            if not isinstance(raw_confidence, (int, float)):
+                raw_confidence = 0.5
+
             enhanced = EnhancedPrompt(
                 original_task=task,
-                enhanced_task=data.get("enhanced_task", task),
-                added_context=data.get("added_context", ""),
-                suggestions=data.get("suggestions", []),
-                confidence=min(1.0, max(0.0, data.get("confidence", 0.5)))
+                enhanced_task=enhanced_task,
+                added_context=added_context,
+                suggestions=suggestions,
+                confidence=min(1.0, max(0.0, float(raw_confidence)))
             )
 
             logger.info(f"Prompt enhanced with confidence: {enhanced.confidence}")

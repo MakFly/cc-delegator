@@ -41,8 +41,13 @@ MAX_FILES_COUNT = 5        # Limit files to avoid massive prompts
 # Background Mode Constants
 # =============================================================================
 # Contexts >= 8000 chars use background processing to avoid MCP timeout
-DIRECT_MODE_LIMIT = 8000           # < 8k → direct (sync response)
-BACKGROUND_MODE_THRESHOLD = 8000   # >= 8k → background (returns job_id)
+BACKGROUND_MODE_THRESHOLD = 8000   # < threshold → direct; >= threshold → background (returns job_id)
+
+# =============================================================================
+# Model Constants
+# =============================================================================
+DEFAULT_MODEL = os.environ.get("GLM_MODEL", "glm-5")
+FALLBACK_MODEL = "glm-4.7"
 
 # =============================================================================
 # Argument Parsing
@@ -62,7 +67,7 @@ Examples:
   python3 glm_mcp_server.py -p openai-compatible -u https://api.openai.com/v1 -k $OPENAI_API_KEY -m gpt-4o
 
   # GLM via Z.AI
-  python3 glm_mcp_server.py -p anthropic-compatible -u https://api.z.ai/api/anthropic -k $GLM_API_KEY -m glm-4.7
+  python3 glm_mcp_server.py -p anthropic-compatible -u https://api.z.ai/api/anthropic -k $GLM_API_KEY -m glm-5
 
   # Ollama local
   python3 glm_mcp_server.py -p openai-compatible -u http://localhost:11434/v1 -m llama3.1
@@ -90,8 +95,8 @@ Examples:
 
     parser.add_argument(
         "-m", "--model",
-        default="glm-4.7",
-        help="Model name (default: glm-4.7)"
+        default=DEFAULT_MODEL,
+        help=f"Model name (default: {DEFAULT_MODEL}, fallback: {FALLBACK_MODEL})"
     )
 
     parser.add_argument(
@@ -624,13 +629,12 @@ class LLMDelegatorMCPServer:
             model=args.model,
             apiVersion=args.api_version,
             timeout=args.timeout,
-            maxTokens=args.max_tokens
+            maxTokens=args.max_tokens,
+            api_key=args.api_key,
         )
 
         # Create the provider instance
         self.provider: BaseProvider = ProviderFactory.create(self.backend_config)
-        # Override API key from args
-        self.provider.api_key = args.api_key
 
         # Initialize enhancer and guard
         self.enhancer = PromptEnhancer(self.provider)
@@ -638,6 +642,9 @@ class LLMDelegatorMCPServer:
 
         # Initialize job manager for background processing
         self.job_manager = JobManager()
+
+        # Track background tasks to prevent GC collection
+        self._background_tasks: set[asyncio.Task] = set()
 
         self.logger = logger_instance
         self.logger.info(f"LLM Delegator MCP Server initialized")
@@ -647,8 +654,9 @@ class LLMDelegatorMCPServer:
         self.logger.info(f"API Key: {'configured' if self.provider.api_key else 'missing'}")
 
         if not self.provider.api_key and self.backend_config.baseUrl not in ["http://localhost:11434/v1", "http://localhost:1234/v1", "http://localhost:8000/v1"]:
-            self.logger.error("API key required but not provided. Use --api-key or set environment variable.")
-            sys.exit(1)
+            raise RuntimeError(
+                "API key required but not provided. Use --api-key or set environment variable."
+            )
 
     async def start(self):
         """Initialize the provider and job manager."""
@@ -658,6 +666,11 @@ class LLMDelegatorMCPServer:
 
     async def stop(self):
         """Close the provider and job manager."""
+        for t in self._background_tasks:
+            t.cancel()
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
         await self.job_manager.stop()
         await self.provider.stop()
         self.logger.info("Provider closed")
@@ -686,6 +699,10 @@ class LLMDelegatorMCPServer:
         if expert not in EXPERT_PROMPTS:
             raise ValueError(f"Unknown expert: {expert}. Available: {list(EXPERT_PROMPTS.keys())}")
 
+        task = task.strip()
+        context = context.strip() if context else ""
+        files = files or []
+
         expert_prompt = EXPERT_PROMPTS[expert]
 
         # Build the full prompt
@@ -698,15 +715,15 @@ class LLMDelegatorMCPServer:
 ## CONTEXT
 {context if context else "No additional context provided."}
 
-        ## FILES
-        {json.dumps(files, indent=2) if files else "No specific files provided."}
+## FILES
+{json.dumps(files, indent=2) if files else "No specific files provided."}
 
-        ## TRUTHFULNESS
-        {TRUTHFULNESS_POLICY}
+## TRUTHFULNESS
+{TRUTHFULNESS_POLICY}
 
-        ---
+---
 
-        Now respond as the {expert} expert following the response format specified above.
+Now respond as the {expert} expert following the response format specified above.
 """
 
         self.logger.info(f"Calling expert: {expert}, mode: {mode}, provider: {self.backend_config.model}")
@@ -721,8 +738,39 @@ class LLMDelegatorMCPServer:
             return response.text
 
         except Exception as e:
-            self.logger.error(f"Error calling provider: {e}")
-            raise RuntimeError(f"[GLM Expert Error] expert={expert}, error={str(e)}")
+            original_model = self.backend_config.model
+            if original_model != FALLBACK_MODEL:
+                self.logger.warning(
+                    f"Primary model {original_model} failed: {e}. "
+                    f"Retrying with fallback model {FALLBACK_MODEL}..."
+                )
+                # Swap to fallback model
+                self.backend_config.model = FALLBACK_MODEL
+                self.provider.config.model = FALLBACK_MODEL
+                try:
+                    response: ProviderResponse = await self.provider.call(
+                        system_prompt=expert_prompt,
+                        user_prompt=full_prompt
+                    )
+                    self.logger.info(
+                        f"Fallback response received ({FALLBACK_MODEL}): "
+                        f"{len(response.text)} characters"
+                    )
+                    return response.text
+                except Exception as fallback_error:
+                    self.logger.error(f"Fallback model also failed: {fallback_error}")
+                    raise RuntimeError(
+                        f"[GLM Expert Error] expert={expert}, "
+                        f"primary={original_model} error={e}, "
+                        f"fallback={FALLBACK_MODEL} error={fallback_error}"
+                    )
+                finally:
+                    # Restore original model for next calls
+                    self.backend_config.model = original_model
+                    self.provider.config.model = original_model
+            else:
+                self.logger.error(f"Error calling provider: {e}")
+                raise RuntimeError(f"[GLM Expert Error] expert={expert}, error={str(e)}")
 
     def _should_use_background_mode(self, task: str, context: str, files: list) -> bool:
         """
@@ -1010,6 +1058,8 @@ class LLMDelegatorMCPServer:
         # Handle expert delegation
         task = arguments.get("task", "")
         mode = arguments.get("mode", "advisory")
+        if mode not in ("advisory", "implementation"):
+            mode = "advisory"
         context = arguments.get("context", "")
         files = arguments.get("files", [])
         # Default to false to avoid doubling LLM calls on large contexts,
@@ -1104,7 +1154,12 @@ class LLMDelegatorMCPServer:
                 )
 
                 # Launch background processing
-                asyncio.create_task(self._process_background_job(job))
+                bg_task = asyncio.create_task(
+                    self._process_background_job(job),
+                    name=f"bg-job-{job.job_id}"
+                )
+                self._background_tasks.add(bg_task)
+                bg_task.add_done_callback(self._background_tasks.discard)
 
                 # Return job_id immediately
                 self.logger.info(f"Background job created: {job.job_id} (context={total_chars} chars)")
@@ -1158,13 +1213,12 @@ class LLMDelegatorMCPServer:
                 ]
             }
         except Exception as e:
-            error_msg = str(e)
-            self.logger.error(f"Tool call failed: {error_msg}")
+            self.logger.error(f"Tool call failed: {e}")
             return {
                 "content": [
                     {
                         "type": "text",
-                        "text": error_msg
+                        "text": "Expert delegation failed. Check server logs for details."
                     }
                 ],
                 "isError": True
@@ -1311,6 +1365,7 @@ class LLMDelegatorMCPServer:
         response = {
             "action": action,
             "status": "acknowledged",
+            "warning": "Workflow engine is experimental - state is not persisted between calls",
             "message": ""
         }
 
@@ -1475,7 +1530,7 @@ async def handle_message(message: dict):
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "llm-delegator",
-                    "version": "2.0.0"
+                    "version": "3.0.0"
                 },
                 "capabilities": {
                     "tools": {}
@@ -1488,16 +1543,28 @@ async def handle_message(message: dict):
         return None
 
     elif message.get("method") == "tools/list":
-        if server:
-            await server.start()
-            return {"result": await server.list_tools()}
+        if not server:
+            return {
+                "error": {
+                    "code": -32603,
+                    "message": "Server not initialized"
+                }
+            }
+        await server.start()
+        return {"result": await server.list_tools()}
 
     elif message.get("method") == "tools/call":
-        if server:
-            params = message.get("params", {})
-            name = params.get("name")
-            arguments = params.get("arguments", {})
-            return {"result": await server.call_tool(name, arguments)}
+        if not server:
+            return {
+                "error": {
+                    "code": -32603,
+                    "message": "Server not initialized"
+                }
+            }
+        params = message.get("params", {})
+        name = params.get("name")
+        arguments = params.get("arguments", {})
+        return {"result": await server.call_tool(name, arguments)}
 
     else:
         return {
@@ -1541,7 +1608,7 @@ async def main():
                 if "id" in message and response is not None:
                     response["id"] = message["id"]
                     response["jsonrpc"] = "2.0"
-                    await send_jsonrpc(response)
+                    send_jsonrpc(response)
 
             except json.JSONDecodeError as e:
                 if logger:
@@ -1554,7 +1621,7 @@ async def main():
             await server.stop()
 
 
-async def send_jsonrpc(data: dict):
+def send_jsonrpc(data: dict):
     """Send JSON-RPC message to stdout."""
     json.dump(data, sys.stdout)
     sys.stdout.write("\n")

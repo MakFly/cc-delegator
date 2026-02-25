@@ -1,7 +1,7 @@
 """Tests for job_manager.py — JobStatus, Job, JobManager."""
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -288,7 +288,7 @@ class TestJobManager:
             files=[]
         )
         # Manually backdate the job
-        manager._jobs[old_job.job_id].created_at = datetime.utcnow() - timedelta(hours=2)
+        manager._jobs[old_job.job_id].created_at = datetime.now(timezone.utc) - timedelta(hours=2)
 
         # Create a new job
         new_job = await manager.create_job(
@@ -319,7 +319,8 @@ class TestJobManager:
             files=[]
         )
         # Manually backdate and set to PROCESSING
-        manager._jobs[stuck_job.job_id].created_at = datetime.utcnow() - timedelta(seconds=5)
+        manager._jobs[stuck_job.job_id].created_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        manager._jobs[stuck_job.job_id].started_at = datetime.now(timezone.utc) - timedelta(seconds=5)
         manager._jobs[stuck_job.job_id].status = JobStatus.PROCESSING
 
         await manager._cleanup_old_jobs()
@@ -328,3 +329,26 @@ class TestJobManager:
         job = await manager.get_job(stuck_job.job_id)
         assert job.status == JobStatus.TIMEOUT
         assert job.error is not None
+
+    @pytest.mark.asyncio
+    async def test_cleanup_timeout_processing_uses_started_at(self):
+        """PROCESSING job with old created_at but recent started_at should NOT timeout."""
+        manager = JobManager(job_timeout=10)
+
+        job = await manager.create_job(
+            expert="architect",
+            task="Recent processing",
+            mode="advisory",
+            context="",
+            files=[]
+        )
+        # created_at is old (30s ago), but started_at is recent (1s ago)
+        manager._jobs[job.job_id].created_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+        manager._jobs[job.job_id].started_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        manager._jobs[job.job_id].status = JobStatus.PROCESSING
+
+        await manager._cleanup_old_jobs()
+
+        # Should NOT be timed out because started_at is recent
+        result = await manager.get_job(job.job_id)
+        assert result.status == JobStatus.PROCESSING

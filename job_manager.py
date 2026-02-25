@@ -8,7 +8,7 @@ Jobs are stored in-memory and have a maximum lifetime of 24 hours.
 import asyncio
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Optional
 
@@ -34,7 +34,7 @@ class Job:
     context: str                         # Contexte fourni
     files: list[str] = field(default_factory=list)  # Liste des fichiers (metadata)
     status: JobStatus = JobStatus.PENDING
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     result: Optional[str] = None         # Résultat (si COMPLETED)
@@ -61,7 +61,7 @@ class Job:
         """Calculate job age in seconds."""
         if self.completed_at:
             return (self.completed_at - self.created_at).total_seconds()
-        return (datetime.utcnow() - self.created_at).total_seconds()
+        return (datetime.now(timezone.utc) - self.created_at).total_seconds()
 
 
 class JobManager:
@@ -90,6 +90,8 @@ class JobManager:
         """Démarre le cleanup task en arrière-plan."""
         if self._running:
             return
+        # Fail-fast if no running event loop
+        asyncio.get_running_loop()
         self._running = True
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         self.logger.info("JobManager started")
@@ -115,7 +117,7 @@ class JobManager:
         task: str,
         mode: str,
         context: str,
-        files: list[str],
+        files: list[str] = None,
         metadata: dict = None
     ) -> Job:
         """
@@ -164,9 +166,9 @@ class JobManager:
         job.status = status
 
         if status == JobStatus.PROCESSING:
-            job.started_at = datetime.utcnow()
+            job.started_at = datetime.now(timezone.utc)
         elif status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.TIMEOUT):
-            job.completed_at = datetime.utcnow()
+            job.completed_at = datetime.now(timezone.utc)
 
         if result is not None:
             job.result = result
@@ -188,7 +190,7 @@ class JobManager:
 
     async def _cleanup_old_jobs(self) -> None:
         """Supprime jobs > 24h, marque jobs > 300s en TIMEOUT."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         retention_cutoff = now - timedelta(hours=self.retention_hours)
         timeout_cutoff = now - timedelta(seconds=self.job_timeout)
 
@@ -200,9 +202,13 @@ class JobManager:
             if job.created_at < retention_cutoff:
                 jobs_to_remove.append(job_id)
             # Mark stuck jobs as timeout
-            elif (job.status in (JobStatus.PENDING, JobStatus.PROCESSING)
-                  and job.created_at < timeout_cutoff):
-                jobs_to_timeout.append(job_id)
+            elif job.status in (JobStatus.PENDING, JobStatus.PROCESSING):
+                ref_time = (
+                    job.started_at if job.status == JobStatus.PROCESSING and job.started_at
+                    else job.created_at
+                )
+                if ref_time < timeout_cutoff:
+                    jobs_to_timeout.append(job_id)
 
         for job_id in jobs_to_remove:
             del self._jobs[job_id]

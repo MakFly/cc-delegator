@@ -114,6 +114,24 @@ class TestBaseProviderLifecycle:
         await p.stop()
         assert client.is_closed
 
+    async def test_stop_resets_client_to_none(self, make_backend_config, monkeypatch):
+        p = self._make_provider(make_backend_config, monkeypatch)
+        await p.start()
+        assert p._client is not None
+        await p.stop()
+        assert p._client is None
+
+    async def test_restart_after_stop(self, make_backend_config, monkeypatch):
+        p = self._make_provider(make_backend_config, monkeypatch)
+        await p.start()
+        first_client = p._client
+        await p.stop()
+        assert p._client is None
+        await p.start()
+        assert p._client is not None
+        assert p._client is not first_client
+        await p.stop()
+
 
 # ============================================================================
 # _validate_api_key
