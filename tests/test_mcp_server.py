@@ -35,10 +35,27 @@ class TestExpertPrompts:
 
 class TestListTools:
 
-    async def test_returns_five_tools(self, mock_args, mock_logger):
+    async def test_returns_ten_tools(self, mock_args, mock_logger):
         srv = LLMDelegatorMCPServer(mock_args, mock_logger)
         result = await srv.list_tools()
-        assert len(result["tools"]) == 5
+        assert len(result["tools"]) == 10
+
+    async def test_expected_tool_names(self, mock_args, mock_logger):
+        srv = LLMDelegatorMCPServer(mock_args, mock_logger)
+        result = await srv.list_tools()
+        tool_names = {tool["name"] for tool in result["tools"]}
+        assert tool_names == {
+            "glm_architect",
+            "glm_code_reviewer",
+            "glm_security_analyst",
+            "glm_plan_reviewer",
+            "glm_scope_analyst",
+            "glm_enhance_prompt",
+            "glm_validate_prompt",
+            "glm_route",
+            "glm_workflow",
+            "glm_get_job_result",
+        }
 
     async def test_names_prefixed_glm(self, mock_args, mock_logger):
         srv = LLMDelegatorMCPServer(mock_args, mock_logger)
@@ -46,13 +63,29 @@ class TestListTools:
         for tool in result["tools"]:
             assert tool["name"].startswith("glm_")
 
-    async def test_schema_has_required_task(self, mock_args, mock_logger):
+    async def test_schema_required_fields_by_tool(self, mock_args, mock_logger):
         srv = LLMDelegatorMCPServer(mock_args, mock_logger)
         result = await srv.list_tools()
-        for tool in result["tools"]:
-            schema = tool["inputSchema"]
-            assert "task" in schema["required"]
-            assert "task" in schema["properties"]
+        by_name = {tool["name"]: tool["inputSchema"] for tool in result["tools"]}
+
+        expected_required = {
+            "glm_architect": ["task"],
+            "glm_code_reviewer": ["task"],
+            "glm_security_analyst": ["task"],
+            "glm_plan_reviewer": ["task"],
+            "glm_scope_analyst": ["task"],
+            "glm_enhance_prompt": ["task"],
+            "glm_validate_prompt": ["task"],
+            "glm_route": ["task"],
+            "glm_workflow": ["action"],
+            "glm_get_job_result": ["job_id"],
+        }
+
+        for name, required in expected_required.items():
+            schema = by_name[name]
+            assert schema["required"] == required
+            for field in required:
+                assert field in schema["properties"]
 
 
 # ============================================================================
@@ -118,6 +151,19 @@ class TestCallExpert:
         user_prompt = call_args.kwargs.get("user_prompt") or call_args.args[1]
         assert "ADVISORY" in user_prompt
 
+    async def test_call_expert_includes_truthfulness_policy(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="ok", raw={}, model="m")
+        )
+
+        await srv.call_expert("architect", "Assess this design")
+        call_args = srv.provider.call.call_args
+        user_prompt = call_args.kwargs.get("user_prompt") or call_args.args[1]
+        assert "Non-Negotiable Truthfulness Policy" in user_prompt
+        assert "Never invent facts" in user_prompt
+        assert "Request a targeted web search" in user_prompt
+
 
 # ============================================================================
 # call_tool
@@ -164,6 +210,55 @@ class TestCallTool:
         call_args = srv.provider.call.call_args
         user_prompt = call_args.kwargs.get("user_prompt") or call_args.args[1]
         assert "ADVISORY" in user_prompt
+
+    async def test_call_tool_rejects_too_many_files(self, mock_args, mock_logger):
+        """Timeout protection: reject when files > MAX_FILES_COUNT."""
+        srv = self._server(mock_args, mock_logger)
+
+        # 6 files > MAX_FILES_COUNT (5)
+        files = [f"file{i}.ts" for i in range(6)]
+        result = await srv.call_tool("glm_architect", {
+            "task": "review",
+            "files": files
+        })
+
+        assert result["isError"] is True
+        error_data = json.loads(result["content"][0]["text"])
+        assert error_data["error"] == "context_too_large"
+        assert "Too many files" in error_data["message"]
+
+    async def test_call_tool_rejects_large_context(self, mock_args, mock_logger):
+        """Timeout protection: reject when context > MAX_CONTEXT_CHARS."""
+        srv = self._server(mock_args, mock_logger)
+
+        # Context larger than MAX_CONTEXT_CHARS (15000)
+        large_context = "x" * 20000
+        result = await srv.call_tool("glm_architect", {
+            "task": "review",
+            "context": large_context
+        })
+
+        assert result["isError"] is True
+        error_data = json.loads(result["content"][0]["text"])
+        assert error_data["error"] == "context_too_large"
+        assert "Context too large" in error_data["message"]
+
+    async def test_call_tool_accepts_valid_context(self, mock_args, mock_logger):
+        """Timeout protection: accept when context is within limits."""
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="ok", raw={}, model="m")
+        )
+
+        # 3 files < MAX_FILES_COUNT (5), small context
+        result = await srv.call_tool("glm_architect", {
+            "task": "review this",
+            "context": "some context",
+            "files": ["file1.ts", "file2.ts", "file3.ts"]
+        })
+
+        assert "isError" not in result
+        assert result["content"][0]["text"] == "ok"
 
 
 # ============================================================================
@@ -270,3 +365,224 @@ class TestServerLifecycle:
         srv.provider = AsyncMock()
         await srv.stop()
         srv.provider.stop.assert_called_once()
+
+    def test_server_init_does_not_log_api_key_value(self, mock_args):
+        fake_logger = MagicMock()
+        LLMDelegatorMCPServer(mock_args, fake_logger)
+
+        messages = [str(call.args[0]) for call in fake_logger.info.call_args_list if call.args]
+        assert "API Key: configured" in messages
+        assert not any("test-key-12345678" in msg for msg in messages)
+        assert not any("12345678" in msg for msg in messages)
+
+    async def test_server_start_starts_job_manager(self, mock_args, mock_logger):
+        srv = LLMDelegatorMCPServer(mock_args, mock_logger)
+        srv.provider = AsyncMock()
+        await srv.start()
+        assert srv.job_manager._running is True
+        await srv.job_manager.stop()
+
+    async def test_server_stop_stops_job_manager(self, mock_args, mock_logger):
+        srv = LLMDelegatorMCPServer(mock_args, mock_logger)
+        srv.provider = AsyncMock()
+        await srv.start()
+        await srv.stop()
+        assert srv.job_manager._running is False
+
+
+# ============================================================================
+# Background Mode
+# ============================================================================
+
+
+class TestBackgroundMode:
+
+    def _server(self, mock_args, mock_logger):
+        srv = LLMDelegatorMCPServer(mock_args, mock_logger)
+        srv.provider = AsyncMock()
+        return srv
+
+    def test_should_use_background_mode_small_context(self, mock_args, mock_logger):
+        """Small context (< 8000 chars) should use direct mode."""
+        srv = self._server(mock_args, mock_logger)
+
+        result = srv._should_use_background_mode(
+            task="small task",
+            context="small context",
+            files=[]
+        )
+
+        assert result is False
+
+    def test_should_use_background_mode_large_context(self, mock_args, mock_logger):
+        """Large context (>= 8000 chars) should use background mode."""
+        srv = self._server(mock_args, mock_logger)
+
+        # Create context >= 8000 chars
+        large_context = "x" * 8000
+
+        result = srv._should_use_background_mode(
+            task="task",
+            context=large_context,
+            files=[]
+        )
+
+        assert result is True
+
+    def test_should_use_background_mode_threshold(self, mock_args, mock_logger):
+        """Test exact threshold boundary."""
+        srv = self._server(mock_args, mock_logger)
+
+        # Task of 1000 chars + context of 6999 chars = 7999 (just under)
+        result = srv._should_use_background_mode(
+            task="x" * 1000,
+            context="y" * 6999,
+            files=[]
+        )
+        assert result is False
+
+        # Task of 1000 chars + context of 7000 chars = 8000 (at threshold)
+        result = srv._should_use_background_mode(
+            task="x" * 1000,
+            context="y" * 7000,
+            files=[]
+        )
+        assert result is True
+
+    async def test_call_tool_returns_job_id_for_large_context(self, mock_args, mock_logger):
+        """Large context should return job_id instead of direct response."""
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="expert reply", raw={}, model="m")
+        )
+
+        # Create context >= 8000 chars
+        large_context = "x" * 9000
+
+        result = await srv.call_tool("glm_architect", {
+            "task": "review",
+            "context": large_context
+        })
+
+        # Should return job_id, not direct response
+        assert "isError" not in result
+        response_data = json.loads(result["content"][0]["text"])
+        assert "job_id" in response_data
+        assert response_data["status"] == "pending"
+        assert response_data["job_id"].startswith("job_")
+
+    async def test_call_tool_direct_mode_for_small_context(self, mock_args, mock_logger):
+        """Small context should return direct response."""
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="expert reply", raw={}, model="m")
+        )
+
+        result = await srv.call_tool("glm_architect", {
+            "task": "review",
+            "context": "small context"
+        })
+
+        # Should return direct response
+        assert "isError" not in result
+        assert result["content"][0]["text"] == "expert reply"
+
+    async def test_get_job_result_not_found(self, mock_args, mock_logger):
+        """get_job_result returns error for non-existent job."""
+        srv = self._server(mock_args, mock_logger)
+
+        result = await srv.call_tool("glm_get_job_result", {
+            "job_id": "nonexistent"
+        })
+
+        assert result["isError"] is True
+        response_data = json.loads(result["content"][0]["text"])
+        assert response_data["error"] == "job_not_found"
+
+    async def test_get_job_result_missing_job_id(self, mock_args, mock_logger):
+        """get_job_result returns error when job_id is missing."""
+        srv = self._server(mock_args, mock_logger)
+
+        result = await srv.call_tool("glm_get_job_result", {})
+
+        assert result["isError"] is True
+        response_data = json.loads(result["content"][0]["text"])
+        assert response_data["error"] == "job_id_required"
+
+    async def test_get_job_result_pending_job(self, mock_args, mock_logger):
+        """get_job_result returns pending status for queued job."""
+        srv = self._server(mock_args, mock_logger)
+
+        # Create a job directly
+        job = await srv.job_manager.create_job(
+            expert="architect",
+            task="test task",
+            mode="advisory",
+            context="",
+            files=[]
+        )
+
+        result = await srv.call_tool("glm_get_job_result", {
+            "job_id": job.job_id
+        })
+
+        assert "isError" not in result
+        response_data = json.loads(result["content"][0]["text"])
+        assert response_data["status"] == "pending"
+        assert "age_seconds" in response_data
+
+    async def test_get_job_result_completed_job(self, mock_args, mock_logger):
+        """get_job_result returns result for completed job."""
+        srv = self._server(mock_args, mock_logger)
+
+        # Create and complete a job
+        job = await srv.job_manager.create_job(
+            expert="architect",
+            task="test task",
+            mode="advisory",
+            context="",
+            files=[]
+        )
+        from job_manager import JobStatus
+        await srv.job_manager.update_job(
+            job.job_id,
+            JobStatus.COMPLETED,
+            result="Expert analysis complete"
+        )
+
+        result = await srv.call_tool("glm_get_job_result", {
+            "job_id": job.job_id
+        })
+
+        assert "isError" not in result
+        response_data = json.loads(result["content"][0]["text"])
+        assert response_data["status"] == "completed"
+        assert response_data["result"] == "Expert analysis complete"
+
+    async def test_get_job_result_failed_job(self, mock_args, mock_logger):
+        """get_job_result returns error for failed job."""
+        srv = self._server(mock_args, mock_logger)
+
+        # Create and fail a job
+        job = await srv.job_manager.create_job(
+            expert="architect",
+            task="test task",
+            mode="advisory",
+            context="",
+            files=[]
+        )
+        from job_manager import JobStatus
+        await srv.job_manager.update_job(
+            job.job_id,
+            JobStatus.FAILED,
+            error="Something went wrong"
+        )
+
+        result = await srv.call_tool("glm_get_job_result", {
+            "job_id": job.job_id
+        })
+
+        assert result["isError"] is True
+        response_data = json.loads(result["content"][0]["text"])
+        assert response_data["status"] == "failed"
+        assert "Something went wrong" in response_data["error"]

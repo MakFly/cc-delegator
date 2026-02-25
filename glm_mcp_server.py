@@ -25,6 +25,24 @@ from providers import (
     ProviderFactory,
     ProviderResponse
 )
+from prompt_enhancer import PromptEnhancer, EnhancedPrompt
+from prompt_guard import PromptQualityGuard, ValidationResult
+from job_manager import JobManager, JobStatus, Job
+
+# =============================================================================
+# Timeout Protection Constants
+# =============================================================================
+# MCP client has a 60s timeout for tools/call. Large contexts cause slow LLM
+# responses that exceed this limit. Validate early and reject heavy prompts.
+MAX_CONTEXT_CHARS = 15000  # ~4-5k tokens, safe for 60s timeout
+MAX_FILES_COUNT = 5        # Limit files to avoid massive prompts
+
+# =============================================================================
+# Background Mode Constants
+# =============================================================================
+# Contexts >= 8000 chars use background processing to avoid MCP timeout
+DIRECT_MODE_LIMIT = 8000           # < 8k → direct (sync response)
+BACKGROUND_MODE_THRESHOLD = 8000   # >= 8k → background (returns job_id)
 
 # =============================================================================
 # Argument Parsing
@@ -582,6 +600,14 @@ For each intent type, investigate:
 """
 }
 
+TRUTHFULNESS_POLICY = """## Non-Negotiable Truthfulness Policy
+
+- Never invent facts, file paths, APIs, metrics, dates, outputs, or code behavior.
+- If a fact is unknown or cannot be verified from provided context, say it explicitly: "I don't know based on current context."
+- Clearly separate verified facts from assumptions/inferences.
+- If external or up-to-date information is required, do not guess. Request a targeted web search and specify what should be verified.
+"""
+
 # =============================================================================
 # MCP Server Implementation
 # =============================================================================
@@ -606,24 +632,33 @@ class LLMDelegatorMCPServer:
         # Override API key from args
         self.provider.api_key = args.api_key
 
+        # Initialize enhancer and guard
+        self.enhancer = PromptEnhancer(self.provider)
+        self.guard = PromptQualityGuard()
+
+        # Initialize job manager for background processing
+        self.job_manager = JobManager()
+
         self.logger = logger_instance
         self.logger.info(f"LLM Delegator MCP Server initialized")
         self.logger.info(f"Provider: {self.backend_config.provider}")
         self.logger.info(f"Base URL: {self.backend_config.baseUrl}")
         self.logger.info(f"Model: {self.backend_config.model}")
-        self.logger.info(f"API Key: {'*' * 20}{self.provider.api_key[-8:] if self.provider.api_key else 'NONE'}")
+        self.logger.info(f"API Key: {'configured' if self.provider.api_key else 'missing'}")
 
         if not self.provider.api_key and self.backend_config.baseUrl not in ["http://localhost:11434/v1", "http://localhost:1234/v1", "http://localhost:8000/v1"]:
             self.logger.error("API key required but not provided. Use --api-key or set environment variable.")
             sys.exit(1)
 
     async def start(self):
-        """Initialize the provider."""
+        """Initialize the provider and job manager."""
         await self.provider.start()
+        self.job_manager.start()
         self.logger.info("Provider initialized")
 
     async def stop(self):
-        """Close the provider."""
+        """Close the provider and job manager."""
+        await self.job_manager.stop()
         await self.provider.stop()
         self.logger.info("Provider closed")
 
@@ -663,12 +698,15 @@ class LLMDelegatorMCPServer:
 ## CONTEXT
 {context if context else "No additional context provided."}
 
-## FILES
-{json.dumps(files, indent=2) if files else "No specific files provided."}
+        ## FILES
+        {json.dumps(files, indent=2) if files else "No specific files provided."}
 
----
+        ## TRUTHFULNESS
+        {TRUTHFULNESS_POLICY}
 
-Now respond as the {expert} expert following the response format specified above.
+        ---
+
+        Now respond as the {expert} expert following the response format specified above.
 """
 
         self.logger.info(f"Calling expert: {expert}, mode: {mode}, provider: {self.backend_config.model}")
@@ -685,6 +723,62 @@ Now respond as the {expert} expert following the response format specified above
         except Exception as e:
             self.logger.error(f"Error calling provider: {e}")
             raise RuntimeError(f"[GLM Expert Error] expert={expert}, error={str(e)}")
+
+    def _should_use_background_mode(self, task: str, context: str, files: list) -> bool:
+        """
+        Determine if background mode should be used based on context size.
+
+        Returns:
+            True if len(task) + len(context) >= BACKGROUND_MODE_THRESHOLD
+        """
+        total_chars = len(task) + len(context)
+        return total_chars >= BACKGROUND_MODE_THRESHOLD
+
+    async def _process_background_job(self, job: Job) -> None:
+        """
+        Process a background job in async context.
+
+        Handles enhance flag, calls expert, and updates job status.
+        """
+        try:
+            # Update status to PROCESSING
+            await self.job_manager.update_job(job.job_id, JobStatus.PROCESSING)
+
+            task = job.task
+            context = job.context
+
+            # Auto-enhance if requested
+            if job.metadata.get("enhance", False):
+                self.logger.info(f"Auto-enhancing prompt for background job: {job.job_id}")
+                try:
+                    enhanced: EnhancedPrompt = await self.enhancer.enhance(
+                        task, context, job.expert, job.files
+                    )
+                    task = enhanced.enhanced_task
+                    if enhanced.added_context:
+                        context = f"{context}\n\n{enhanced.added_context}".strip()
+                    self.logger.info(f"Prompt enhanced for job {job.job_id}")
+                except Exception as e:
+                    self.logger.warning(f"Enhancement failed for job {job.job_id}: {e}")
+                    # Continue without enhancement
+
+            # Call the expert
+            result = await self.call_expert(job.expert, task, job.mode, context, job.files)
+
+            # Mark as completed
+            await self.job_manager.update_job(
+                job.job_id,
+                JobStatus.COMPLETED,
+                result=result
+            )
+
+        except Exception as e:
+            self.logger.error(f"Background job {job.job_id} failed: {e}")
+            await self.job_manager.update_job(
+                job.job_id,
+                JobStatus.FAILED,
+                error=str(e)
+            )
 
     async def list_tools(self):
         """List available MCP tools."""
@@ -718,11 +812,180 @@ Now respond as the {expert} expert following the response format specified above
                             "items": {"type": "string"},
                             "description": "List of file paths included in context (metadata only - include actual content in the context parameter)",
                             "default": []
+                        },
+                        "enhance": {
+                            "type": "boolean",
+                            "description": "Auto-enhance prompt before sending to expert (+1 LLM call)",
+                            "default": False
                         }
                     },
                     "required": ["task"]
                 }
             })
+
+        # Tool: glm_enhance_prompt
+        tools.append({
+            "name": "glm_enhance_prompt",
+            "description": "Use LLM to enhance a prompt before sending to expert. Improves clarity, structure, and completeness.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Original task to enhance"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Additional context",
+                        "default": ""
+                    },
+                    "target_expert": {
+                        "type": "string",
+                        "description": "Which expert will receive this",
+                        "default": ""
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": []
+                    }
+                },
+                "required": ["task"]
+            }
+        })
+
+        # Tool: glm_validate_prompt
+        tools.append({
+            "name": "glm_validate_prompt",
+            "description": "Validate a prompt using static rules (no LLM call). Checks file existence, hallucination signals.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Task to validate"
+                    },
+                    "context": {
+                        "type": "string",
+                        "default": ""
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": []
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "default": ""
+                    }
+                },
+                "required": ["task"]
+            }
+        })
+
+        # Tool: glm_route
+        tools.append({
+            "name": "glm_route",
+            "description": "Intelligently route a task to the best available tool (expert/skill/team) using hybrid keyword + semantic matching",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task to route"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Additional context about the codebase",
+                        "default": ""
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of files involved in the task",
+                        "default": []
+                    },
+                    "decide_team": {
+                        "type": "boolean",
+                        "description": "Whether to include team spawning decision",
+                        "default": True
+                    }
+                },
+                "required": ["task"]
+            }
+        })
+
+        # Tool: glm_workflow
+        tools.append({
+            "name": "glm_workflow",
+            "description": "Execute automated workflow: Code → Review → Test → Fix → Report with state machine management",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["start", "status", "pause", "resume", "complete_execution", "complete_review", "complete_test", "complete_fix", "complete_report"],
+                        "description": "Workflow action to perform",
+                        "default": "status"
+                    },
+                    "plan": {
+                        "type": "object",
+                        "description": "Validated plan object (required for 'start' action)"
+                    },
+                    "routing_decision": {
+                        "type": "object",
+                        "description": "Output from glm_route (optional for 'start')"
+                    },
+                    "result": {
+                        "type": "string",
+                        "description": "Execution result description"
+                    },
+                    "verdict": {
+                        "type": "string",
+                        "description": "Review verdict (for complete_review): APPROVE, REQUEST_CHANGES, or REJECT"
+                    },
+                    "issues": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of issues found (for complete_review)"
+                    },
+                    "passed": {
+                        "type": "boolean",
+                        "description": "Whether tests passed (for complete_test)"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Test summary or execution result"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Fix description (for complete_fix)"
+                    },
+                    "report": {
+                        "type": "string",
+                        "description": "Final report (for complete_report)"
+                    }
+                },
+                "required": ["action"]
+            }
+        })
+
+        # Tool: glm_get_job_result
+        tools.append({
+            "name": "glm_get_job_result",
+            "description": "Retrieve the result of a background job. Poll this to check status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "Job ID returned by glm_{expert} when job was queued"
+                    }
+                },
+                "required": ["job_id"]
+            }
+        })
+
         return {"tools": tools}
 
     async def call_tool(self, name: str, arguments: dict):
@@ -730,14 +993,162 @@ Now respond as the {expert} expert following the response format specified above
         if not name.startswith("glm_"):
             raise ValueError(f"Unknown tool: {name}")
 
-        expert = name[4:]  # Remove "glm_" prefix
+        tool_name = name[4:]  # Remove "glm_" prefix
+
+        # Handle special tools first
+        if tool_name == "enhance_prompt":
+            return await self._handle_enhance_prompt(arguments)
+        elif tool_name == "validate_prompt":
+            return await self._handle_validate_prompt(arguments)
+        elif tool_name == "route":
+            return await self._handle_route(arguments)
+        elif tool_name == "workflow":
+            return await self._handle_workflow(arguments)
+        elif tool_name == "get_job_result":
+            return await self._handle_get_job_result(arguments)
+
+        # Handle expert delegation
         task = arguments.get("task", "")
         mode = arguments.get("mode", "advisory")
         context = arguments.get("context", "")
         files = arguments.get("files", [])
+        # Default to false to avoid doubling LLM calls on large contexts,
+        # which can exceed client-side tools/call deadlines.
+        enhance = arguments.get("enhance", False)
 
+        # =========================================================================
+        # TIMEOUT PROTECTION: Validate context size before LLM call
+        # MCP client has 60s timeout. Large contexts cause slow responses.
+        # =========================================================================
+        total_chars = len(task) + len(context)
+        files_count = len(files) if files else 0
+
+        if files_count > MAX_FILES_COUNT:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "error": "context_too_large",
+                        "message": f"Too many files ({files_count} > {MAX_FILES_COUNT}). "
+                                   f"This will likely exceed the 60s MCP timeout.",
+                        "suggestions": [
+                            f"Reduce files to max {MAX_FILES_COUNT} most relevant ones",
+                            "Include file contents in 'context' parameter instead",
+                            "Split into multiple smaller requests"
+                        ],
+                        "current_size": {
+                            "files_count": files_count,
+                            "task_chars": len(task),
+                            "context_chars": len(context)
+                        },
+                        "limits": {
+                            "max_files": MAX_FILES_COUNT,
+                            "max_context_chars": MAX_CONTEXT_CHARS
+                        }
+                    }, indent=2)
+                }],
+                "isError": True
+            }
+
+        if total_chars > MAX_CONTEXT_CHARS:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "error": "context_too_large",
+                        "message": f"Context too large ({total_chars} > {MAX_CONTEXT_CHARS} chars). "
+                                   f"This will likely exceed the 60s MCP timeout.",
+                        "suggestions": [
+                            f"Reduce context to max {MAX_CONTEXT_CHARS} chars",
+                            "Summarize instead of including full file contents",
+                            "Focus on specific files/functions instead of entire codebase",
+                            "Split into multiple smaller requests"
+                        ],
+                        "current_size": {
+                            "files_count": files_count,
+                            "task_chars": len(task),
+                            "context_chars": len(context),
+                            "total_chars": total_chars
+                        },
+                        "limits": {
+                            "max_files": MAX_FILES_COUNT,
+                            "max_context_chars": MAX_CONTEXT_CHARS
+                        }
+                    }, indent=2)
+                }],
+                "isError": True
+            }
+
+        # Warn if approaching limit (80% threshold)
+        if total_chars > MAX_CONTEXT_CHARS * 0.8:
+            self.logger.warning(
+                f"Context size ({total_chars} chars) approaching limit ({MAX_CONTEXT_CHARS}). "
+                f"Consider reducing for faster responses."
+            )
+
+        # =========================================================================
+        # BACKGROUND MODE: Use async job for large contexts
+        # =========================================================================
+        use_background = self._should_use_background_mode(task, context, files)
+
+        if use_background:
+            try:
+                # Create background job
+                job = await self.job_manager.create_job(
+                    expert=tool_name,
+                    task=task,
+                    mode=mode,
+                    context=context,
+                    files=files,
+                    metadata={"enhance": enhance}
+                )
+
+                # Launch background processing
+                asyncio.create_task(self._process_background_job(job))
+
+                # Return job_id immediately
+                self.logger.info(f"Background job created: {job.job_id} (context={total_chars} chars)")
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "job_id": job.job_id,
+                            "status": "pending",
+                            "message": "Job queued. Use glm_get_job_result to retrieve result.",
+                            "context_size": total_chars
+                        }, indent=2)
+                    }]
+                }
+            except RuntimeError as e:
+                # Max jobs reached
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "error": "max_jobs_reached",
+                            "message": str(e)
+                        }, indent=2)
+                    }],
+                    "isError": True
+                }
+
+        # =========================================================================
+        # DIRECT MODE: Synchronous response for small contexts
+        # =========================================================================
         try:
-            result = await self.call_expert(expert, task, mode, context, files)
+            # Auto-enhance if requested
+            if enhance:
+                self.logger.info(f"Auto-enhancing prompt for expert: {tool_name}")
+                enhanced: EnhancedPrompt = await self.enhancer.enhance(
+                    task, context, tool_name, files
+                )
+                task = enhanced.enhanced_task
+                # Merge added context
+                if enhanced.added_context:
+                    context = f"{context}\n\n{enhanced.added_context}".strip()
+                self.logger.info(f"Prompt enhanced (confidence: {enhanced.confidence})")
+
+            result = await self.call_expert(tool_name, task, mode, context, files)
             return {
                 "content": [
                     {
@@ -757,6 +1168,290 @@ Now respond as the {expert} expert following the response format specified above
                     }
                 ],
                 "isError": True
+            }
+
+    async def _handle_enhance_prompt(self, arguments: dict) -> dict:
+        """Handle glm_enhance_prompt tool."""
+        task = arguments.get("task", "")
+        context = arguments.get("context", "")
+        target_expert = arguments.get("target_expert", "")
+        files = arguments.get("files", [])
+
+        try:
+            result: EnhancedPrompt = await self.enhancer.enhance(
+                task, context, target_expert, files
+            )
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "original_task": result.original_task,
+                        "enhanced_task": result.enhanced_task,
+                        "added_context": result.added_context,
+                        "suggestions": result.suggestions,
+                        "confidence": result.confidence
+                    }, indent=2)
+                }]
+            }
+        except Exception as e:
+            self.logger.error(f"Enhance prompt failed: {e}")
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "error": str(e),
+                        "original_task": task,
+                        "enhanced_task": task,
+                        "confidence": 0.0
+                    })
+                }],
+                "isError": True
+            }
+
+    async def _handle_validate_prompt(self, arguments: dict) -> dict:
+        """Handle glm_validate_prompt tool."""
+        task = arguments.get("task", "")
+        context = arguments.get("context", "")
+        files = arguments.get("files", [])
+        working_dir = arguments.get("working_dir", "") or None
+
+        try:
+            result: ValidationResult = self.guard.validate(
+                task, context, files, working_dir
+            )
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "is_valid": result.is_valid,
+                        "warnings": result.warnings,
+                        "errors": result.errors,
+                        "suggestions": result.suggestions
+                    }, indent=2)
+                }]
+            }
+        except Exception as e:
+            self.logger.error(f"Validate prompt failed: {e}")
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "error": str(e),
+                        "is_valid": False
+                    })
+                }],
+                "isError": True
+            }
+
+    async def _handle_route(self, arguments: dict) -> dict:
+        """Handle glm_route tool - placeholder for intelligent routing."""
+        task = arguments.get("task", "")
+        context = arguments.get("context", "")
+        files = arguments.get("files", [])
+        decide_team = arguments.get("decide_team", True)
+
+        # Simple routing logic based on keywords
+        routing = {
+            "task": task,
+            "recommended_expert": None,
+            "reasoning": "",
+            "alternative_experts": [],
+            "should_spawn_team": False
+        }
+
+        task_lower = task.lower()
+
+        # Security-related keywords
+        if any(kw in task_lower for kw in ["security", "vulnerability", "exploit", "auth", "credential", "injection", "xss"]):
+            routing["recommended_expert"] = "security_analyst"
+            routing["reasoning"] = "Task involves security concerns"
+        # Architecture-related keywords
+        elif any(kw in task_lower for kw in ["architecture", "design", "structure", "tradeoff", "pattern", "scalab"]):
+            routing["recommended_expert"] = "architect"
+            routing["reasoning"] = "Task involves architectural decisions"
+        # Code review keywords
+        elif any(kw in task_lower for kw in ["review", "check", "bug", "issue", "quality", "smell"]):
+            routing["recommended_expert"] = "code_reviewer"
+            routing["reasoning"] = "Task involves code review"
+        # Plan review keywords
+        elif any(kw in task_lower for kw in ["plan", "verify", "complete", "gap"]):
+            routing["recommended_expert"] = "plan_reviewer"
+            routing["reasoning"] = "Task involves plan validation"
+        # Scope analysis keywords
+        elif any(kw in task_lower for kw in ["scope", "requirement", "ambigui", "unclear", "clarify"]):
+            routing["recommended_expert"] = "scope_analyst"
+            routing["reasoning"] = "Task involves scope clarification"
+        else:
+            routing["recommended_expert"] = "architect"
+            routing["reasoning"] = "Default to architect for general tasks"
+
+        # Set alternatives
+        all_experts = ["architect", "code_reviewer", "security_analyst", "plan_reviewer", "scope_analyst"]
+        routing["alternative_experts"] = [e for e in all_experts if e != routing["recommended_expert"]]
+
+        # Team spawning decision
+        if decide_team:
+            routing["should_spawn_team"] = (
+                len(files) > 3 or
+                any(kw in task_lower for kw in ["parallel", "multiple", "team", "comprehensive"])
+            )
+
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps(routing, indent=2)
+            }]
+        }
+
+    async def _handle_workflow(self, arguments: dict) -> dict:
+        """Handle glm_workflow tool - state machine for automated workflows."""
+        action = arguments.get("action", "status")
+
+        # Simple state machine - in production would use persistent state
+        response = {
+            "action": action,
+            "status": "acknowledged",
+            "message": ""
+        }
+
+        if action == "start":
+            plan = arguments.get("plan", {})
+            response["message"] = "Workflow started"
+            response["plan_received"] = bool(plan)
+        elif action == "status":
+            response["message"] = "No active workflow"
+        elif action == "complete_execution":
+            response["message"] = f"Execution completed: {arguments.get('result', 'No result')}"
+        elif action == "complete_review":
+            verdict = arguments.get("verdict", "UNKNOWN")
+            issues = arguments.get("issues", [])
+            response["message"] = f"Review completed with verdict: {verdict}"
+            response["issues_count"] = len(issues)
+        elif action == "complete_test":
+            passed = arguments.get("passed", False)
+            response["message"] = f"Tests {'passed' if passed else 'failed'}"
+            response["passed"] = passed
+        elif action == "complete_fix":
+            response["message"] = f"Fix applied: {arguments.get('description', 'No description')}"
+        elif action == "complete_report":
+            response["message"] = "Workflow completed"
+            response["report"] = arguments.get("report", "")
+        else:
+            response["message"] = f"Unknown action: {action}"
+
+        return {
+            "content": [{
+                "type": "text",
+                "text": json.dumps(response, indent=2)
+            }]
+        }
+
+    async def _handle_get_job_result(self, arguments: dict) -> dict:
+        """Handle glm_get_job_result tool - retrieve background job status."""
+        job_id = arguments.get("job_id", "").strip()
+
+        # Validate job_id
+        if not job_id:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "error": "job_id_required",
+                        "message": "job_id parameter is required"
+                    }, indent=2)
+                }],
+                "isError": True
+            }
+
+        # Get job
+        job = await self.job_manager.get_job(job_id)
+
+        if not job:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "error": "job_not_found",
+                        "message": "Job expired or invalid job_id",
+                        "job_id": job_id
+                    }, indent=2)
+                }],
+                "isError": True
+            }
+
+        # Build response based on status
+        if job.status == JobStatus.PENDING:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "job_id": job.job_id,
+                        "status": "pending",
+                        "message": "Queued, waiting...",
+                        "age_seconds": int(job._age_seconds())
+                    }, indent=2)
+                }]
+            }
+        elif job.status == JobStatus.PROCESSING:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "job_id": job.job_id,
+                        "status": "processing",
+                        "message": "In progress...",
+                        "age_seconds": int(job._age_seconds())
+                    }, indent=2)
+                }]
+            }
+        elif job.status == JobStatus.COMPLETED:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "job_id": job.job_id,
+                        "status": "completed",
+                        "result": job.result,
+                        "age_seconds": int(job._age_seconds())
+                    }, indent=2)
+                }]
+            }
+        elif job.status == JobStatus.FAILED:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "job_id": job.job_id,
+                        "status": "failed",
+                        "error": job.error or "Unknown error",
+                        "age_seconds": int(job._age_seconds())
+                    }, indent=2)
+                }],
+                "isError": True
+            }
+        elif job.status == JobStatus.TIMEOUT:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "job_id": job.job_id,
+                        "status": "timeout",
+                        "error": job.error or "Timed out after 300s",
+                        "age_seconds": int(job._age_seconds())
+                    }, indent=2)
+                }],
+                "isError": True
+            }
+        else:
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "job_id": job.job_id,
+                        "status": job.status.value,
+                        "message": "Unknown status"
+                    }, indent=2)
+                }]
             }
 
 

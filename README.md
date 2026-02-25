@@ -19,6 +19,7 @@ Claude gains a team of LLM specialists via MCP. Each expert has a distinct speci
 | **Dual mode** | Experts can analyze (read-only) or implement (write) |
 | **Multi-provider** | Use Claude, GPT-4, GLM (4.7/5), Ollama, or any compatible API |
 | **Auto-routing** | Claude detects when to delegate based on your request |
+| **Prompt Enhancement** | LLM-based prompt improvement before expert delegation |
 | **Synthesized responses** | Claude interprets LLM output, never raw passthrough |
 | **Multilingual** | Code Review supports EN/FR/CN (中文) |
 
@@ -41,6 +42,9 @@ Claude gains a team of LLM specialists via MCP. Each expert has a distinct speci
 | Providers | Single | Multi-provider (OpenAI, Anthropic, Ollama, etc.) |
 | Code Review | English only | **EN/FR/CN multilingual** |
 | Security | OWASP | OWASP + Chinese MLPS standards |
+| Prompt Enhancement | None | **LLM-based auto-enhancement** |
+| Routing | None | **Intelligent task routing** |
+| Workflow | None | **State machine for automation** |
 | License | MIT | MIT |
 
 ## Install
@@ -236,7 +240,96 @@ mcp__glm-delegator__glm_code_reviewer({
   mode: "implementation",
   files: ["src/routes/user.ts"]
 })
+
+// With auto-enhancement (+1 LLM call for better prompt)
+mcp__glm-delegator__glm_architect({
+  task: "review this",
+  enhance: true  // Auto-enhance prompt before expert
+})
 ```
+
+## Prompt Enhancement System
+
+LLM Delegator includes a **Prompt Enhancement System** that improves prompt quality before sending to experts.
+
+### Features
+
+| Feature | Description | Cost |
+|---------|-------------|------|
+| **Auto-enhancement** | Add `enhance: true` to any expert call | +1 LLM call |
+| **Manual enhancement** | Use `glm_enhance_prompt` tool directly | +1 LLM call |
+| **Static validation** | Use `glm_validate_prompt` (no LLM) | Free |
+
+### Usage
+
+#### Option 1: Auto-enhance (Recommended)
+
+```typescript
+// Automatically enhance prompt before expert
+mcp__glm-delegator__glm_architect({
+  task: "probably fix the thing",
+  enhance: true  // LLM will clarify and structure the prompt
+})
+```
+
+#### Option 2: Manual Enhancement
+
+```typescript
+// Step 1: Enhance
+const enhanced = mcp__glm-delegator__glm_enhance_prompt({
+  task: "review this code",
+  context: "Authentication module",
+  target_expert: "code_reviewer"
+})
+// Returns: { enhanced_task, suggestions, confidence }
+
+// Step 2: Validate (optional, no LLM call)
+const validation = mcp__glm-delegator__glm_validate_prompt({
+  task: enhanced.enhanced_task,
+  files: ["src/auth.ts"]
+})
+// Returns: { is_valid, warnings, errors, suggestions }
+
+// Step 3: Send to expert
+mcp__glm-delegator__glm_code_reviewer({
+  task: enhanced.enhanced_task
+})
+```
+
+### Enhancement Flow
+
+```
+User Request (vague)
+        ↓
+┌─────────────────────────────────┐
+│   glm_enhance_prompt            │  ← LLM call
+│   - Clarify intent              │
+│   - Add structure               │
+│   - Remove uncertainty signals  │
+└─────────────────────────────────┘
+        ↓
+Enhanced Prompt (clear)
+        ↓
+┌─────────────────────────────────┐
+│   glm_validate_prompt           │  ← Static (no LLM)
+│   - Check file existence        │
+│   - Detect hallucination risks  │
+└─────────────────────────────────┘
+        ↓
+Expert (architect, code_reviewer, etc.)
+        ↓
+Response
+```
+
+### Additional Tools
+
+| Tool | Purpose | LLM Call |
+|------|---------|----------|
+| `glm_enhance_prompt` | Improve prompt quality | Yes |
+| `glm_validate_prompt` | Static validation | No |
+| `glm_route` | Route to best expert | No |
+| `glm_workflow` | Automated workflow state machine | No |
+| `glm_get_job_result` | Poll background job status | No |
 
 ## How It Works
 
@@ -312,7 +405,84 @@ You can configure multiple servers with different providers:
 | Authentication failed | Verify your API key is correct and active |
 | Tool not appearing | Check `~/.claude.json` has correct entry |
 | Expert not triggered | Try explicit: "Ask the architect to review this" |
+| `tools/call` timeout at 60s | See [Timeout Protection](#timeout-protection) below |
 | Python not found | Ensure Python 3.8+ is in your PATH |
+
+### Timeout Protection
+
+The MCP protocol has a **60-second timeout** for `tools/call`. To prevent timeouts, the server uses **Background Processing** for large contexts:
+
+| Context Size | Mode | Behavior |
+|--------------|------|----------|
+| < 8,000 chars | **Direct** | Synchronous response (< 60s) |
+| 8,000-15,000 chars | **Background** | Returns `job_id`, async processing |
+| > 15,000 chars | **Rejected** | Error "context_too_large" |
+
+| Limit | Value | Why |
+|-------|-------|-----|
+| `MAX_CONTEXT_CHARS` | 15,000 chars (~4-5k tokens) | Upper limit |
+| `MAX_FILES_COUNT` | 5 files | Avoid massive prompts |
+| `BACKGROUND_MODE_THRESHOLD` | 8,000 chars | Switch to async |
+
+#### Background Processing Workflow
+
+When context >= 8,000 chars:
+
+```typescript
+// Step 1: Call expert (returns job_id immediately)
+const result = mcp__glm-delegator__glm_architect({
+  task: "Analyze this complex architecture...",
+  context: largeContext  // >= 8000 chars
+})
+// Returns: { job_id: "job_abc123", status: "pending" }
+
+// Step 2: Poll for result
+const status = mcp__glm-delegator__glm_get_job_result({
+  job_id: "job_abc123"
+})
+// Returns: { status: "processing", age_seconds: 5 }
+
+// Step 3: Get final result
+const final = mcp__glm-delegator__glm_get_job_result({
+  job_id: "job_abc123"
+})
+// Returns: { status: "completed", result: "Expert analysis..." }
+```
+
+#### Job Status Values
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Job queued, waiting to start |
+| `processing` | Expert is analyzing |
+| `completed` | Done, result available |
+| `failed` | Error occurred |
+| `timeout` | Job exceeded 300s limit |
+
+**If you get a "context_too_large" error (> 15,000 chars):**
+
+1. **Reduce files**: Include only the 3-5 most relevant files
+2. **Summarize context**: Instead of full file contents, describe the key points
+3. **Split requests**: Break complex tasks into smaller, focused requests
+4. **Use glm-4.7**: Faster than glm-5 for simple tasks
+
+**Example - Before (will timeout):**
+```json
+{
+  "task": "Review architecture of entire codebase",
+  "context": "...",
+  "files": ["file1.ts", "file2.ts", "file3.ts", "file4.ts", "file5.ts", "file6.ts", "file7.ts"]
+}
+```
+
+**Example - After (works):**
+```json
+{
+  "task": "Review auth flow architecture",
+  "context": "Focus on login.ts and middleware.ts only. Other files use standard patterns.",
+  "files": ["login.ts", "middleware.ts"]
+}
+```
 
 ### Debug Mode
 
@@ -347,6 +517,9 @@ python3 glm_mcp_server.py \
 |-----------|---------|
 | `glm_mcp_server.py` | MCP server with argparse-based configuration |
 | `providers.py` | Provider abstraction layer (OpenAI/Anthropic-compatible) |
+| `job_manager.py` | Background job management for large contexts |
+| `prompt_enhancer.py` | LLM-based prompt improvement system |
+| `prompt_guard.py` | Static prompt validation (no LLM) |
 | `prompts/*.md` | Expert personality definitions (for reference) |
 | `rules/*.md` | Delegation rules and triggers (for reference) |
 | `.claude-plugin/plugin.json` | Plugin metadata |
@@ -355,6 +528,10 @@ python3 glm_mcp_server.py \
 
 ```
 Claude Code → MCP Request → glm_mcp_server.py
+                                ↓
+                    [Optional: enhance=true?]
+                                ↓
+                    PromptEnhancer.enhance()  ← +1 LLM call
                                 ↓
                         Provider Layer (providers.py)
                                 ↓

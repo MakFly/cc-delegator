@@ -24,6 +24,7 @@ The mode is determined by the task, not the expert. Any expert can operate in ei
 ## Global Constraint
 
 - **Ne jamais rien inventer.** Experts must only reference information that exists in the provided context, codebase, or user input. Never fabricate file paths, function names, API endpoints, configuration values, or any other factual claims. When uncertain, state it explicitly.
+- **If external/current facts are required, verify before concluding.** If the needed evidence is not in provided context, request a targeted web search (queries + sources to check) instead of guessing.
 
 ## Delegation Triggers
 
@@ -97,6 +98,23 @@ GLM experts do NOT have filesystem access. The `files` parameter only passes pat
 
 - Open-ended architecture questions or conceptual discussions
 - Questions that don't reference specific code
+
+## Timeout Protection (60s MCP Limit)
+
+The MCP protocol has a **60-second timeout** for `tools/call`. The server validates context size before LLM calls:
+
+| Limit | Value | Why |
+|-------|-------|-----|
+| `MAX_CONTEXT_CHARS` | 15,000 chars (~4-5k tokens) | Safe for 60s timeout |
+| `MAX_FILES_COUNT` | 5 files | Avoid massive prompts |
+
+**Rules:**
+1. **Max 5 files** in `files` parameter
+2. **Max 15,000 chars** in `task` + `context` combined
+3. **Summarize** instead of including full file contents
+4. **Focus** on specific areas, not entire codebases
+
+If the server rejects with "context_too_large", reduce the context and retry.
 
 ## Prompt Format (7 Sections — MANDATORY)
 
