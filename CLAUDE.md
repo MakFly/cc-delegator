@@ -12,6 +12,12 @@ A Claude Code plugin that provides GLM (4.7/5) (via Z.AI API) as specialized exp
 # Test plugin locally (loads from working directory)
 claude --plugin-dir /path/to/glm-delegator
 
+# Run tests
+pytest tests/ -v
+
+# Run tests with coverage
+pytest tests/ -v --cov=. --cov-report=term-missing
+
 # Run setup to test installation flow
 /glm-delegator:setup
 
@@ -20,6 +26,38 @@ claude --plugin-dir /path/to/glm-delegator
 ```
 
 ## Architecture
+
+### Module Map
+
+```
+glm_mcp_server.py  ─── MCP JSON-RPC protocol (stdin/stdout), thin entrypoint
+    ├── cli.py          ─── CLI argument parsing + logging setup
+    └── server.py       ─── DelegatorServer: lifecycle, expert calls, background jobs
+        ├── persona_loader.py   ─── Load expert prompts from prompts/personas/*.md
+        ├── tool_registry.py    ─── MCP tool schema definitions
+        ├── tool_handlers.py    ─── Tool handler functions + ServerServices DI
+        ├── providers.py        ─── Multi-provider abstraction (OpenAI, Anthropic)
+        ├── cache_store.py      ─── SQLite response cache with TTL
+        ├── expert_memory.py    ─── Per-project expert learnings
+        ├── claude_memory_bridge.py ─── Bidirectional Claude Code ↔ GLM memory
+        ├── context_compressor.py   ─── Smart context compression
+        ├── prompt_enhancer.py  ─── LLM-based prompt improvement
+        ├── prompt_guard.py     ─── Static prompt validation
+        ├── job_manager.py      ─── Async background job queue
+        └── cache_metrics.py    ─── Unified metrics aggregation
+```
+
+### Import Graph (no circular deps)
+
+```
+glm_mcp_server.py  →  cli.py, server.py
+server.py          →  persona_loader, tool_registry, tool_handlers, providers, job_manager, cache_store, expert_memory, claude_memory_bridge, context_compressor, prompt_enhancer, prompt_guard, cache_metrics
+tool_registry.py   →  persona_loader (Persona type only)
+tool_handlers.py   →  prompt_enhancer, prompt_guard, context_compressor, job_manager, cache_store, cache_metrics
+                      (NO import from server.py — circular import avoided via ServerServices DI)
+persona_loader.py  →  pathlib, re (stdlib only)
+cli.py             →  argparse, logging (stdlib only)
+```
 
 ### Orchestration Flow
 
@@ -57,14 +95,27 @@ User Request → Claude Code → [Match trigger → Select expert]
 
 Every expert can operate in **advisory** (read-only) or **implementation** (workspace-write) mode based on the task.
 
+### Adding a New Expert
+
+1. Create `prompts/personas/{name}.md` starting with `# Expert Name`
+2. Restart server — persona auto-discovered, MCP tool registered as `glm_{name}`
+
+### Adding a Utility Tool
+
+1. Add handler function in `tool_handlers.py`
+2. Add schema dict in `tool_registry.py` UTILITY_TOOLS list
+3. Add entry in `tool_handlers.UTILITY_HANDLERS` dict
+
 ## Key Design Decisions
 
-1. **Custom MCP server** - GLM doesn't have a native CLI MCP server, so we use a Python server
-2. **Anthropic-compatible API** - Z.AI provides an endpoint compatible with Anthropic's API format
-3. **Stateless calls** - Each delegation includes full context (no session management)
-4. **Dual mode** - Any expert can advise or implement based on task
-5. **Synthesize, don't passthrough** - Claude interprets GLM output, applies judgment
-6. **Multilingual** - Code Reviewer supports EN/FR/CN
+1. **Modular architecture** - Server split into `cli.py`, `server.py`, `tool_registry.py`, `tool_handlers.py`, `persona_loader.py`
+2. **DI via ServerServices** - `tool_handlers.py` receives dependencies through a dataclass, no circular imports
+3. **File-based personas** - Expert prompts in `prompts/personas/*.md`, auto-discovered at startup
+4. **Anthropic-compatible API** - Z.AI provides an endpoint compatible with Anthropic's API format
+5. **Stateless calls** - Each delegation includes full context (no session management)
+6. **Dual mode** - Any expert can advise or implement based on task
+7. **Synthesize, don't passthrough** - Claude interprets GLM output, applies judgment
+8. **Multilingual** - Code Reviewer supports EN/FR/CN
 
 ## When NOT to Delegate
 
@@ -86,14 +137,27 @@ Every expert can operate in **advisory** (read-only) or **implementation** (work
 
 ### MCP Server
 
-The MCP server is implemented in `glm_mcp_server.py` and uses the Z.AI Anthropic-compatible API to communicate with GLM (4.7/5).
+The MCP entrypoint is `glm_mcp_server.py` which delegates to `server.py` (DelegatorServer) for business logic.
 
 ## Component Relationships
 
 | Component | Purpose | Notes |
 |-----------|---------|-------|
 | `rules/*.md` | When/how to delegate | Installed to `~/.claude/rules/glm-delegator/` |
-| `commands/*.md` | Slash commands | `/setup`, `/uninstall` |
-| `glm_mcp_server.py` | MCP server implementation | Handles GLM API communication |
+| `commands/*.md` | Slash commands | `/setup`, `/uninstall`, `/workflow` |
+| `prompts/personas/*.md` | Expert system prompts | Auto-discovered by `persona_loader.py` |
+| `prompts/truthfulness_policy.md` | Shared truthfulness policy | Injected into every expert call |
+| `glm_mcp_server.py` | MCP JSON-RPC entrypoint | Thin wrapper around `server.py` |
+| `server.py` | DelegatorServer class | Core business logic |
+| `tool_handlers.py` | Tool handler functions | Uses ServerServices DI |
+| `tool_registry.py` | Tool schema definitions | Expert + utility tool schemas |
+
+## Testing
+
+Coverage target: 80% (configured in `pyproject.toml` `fail_under = 80`).
+
+```bash
+pytest tests/ -v --cov=. --cov-report=term-missing
+```
 
 > Expert prompts adapted from [claude-delegator](https://github.com/jarrodwatts/claude-delegator) and [oh-my-opencode](https://github.com/code-yeongyu/oh-my-opencode)

@@ -352,3 +352,55 @@ class TestJobManager:
         # Should NOT be timed out because started_at is recent
         result = await manager.get_job(job.job_id)
         assert result.status == JobStatus.PROCESSING
+
+    async def test_wait_for_completion_returns_on_event(self):
+        """wait_for_completion returns immediately when job completes."""
+        manager = JobManager()
+        manager.start()
+        try:
+            job = await manager.create_job(
+                expert="architect", task="test", mode="advisory",
+                context="", files=[]
+            )
+            # Complete the job after a short delay
+            async def complete_later():
+                await asyncio.sleep(0.05)
+                await manager.update_job(job.job_id, JobStatus.COMPLETED, result="done")
+            asyncio.create_task(complete_later())
+
+            result = await manager.wait_for_completion(job.job_id, timeout=5)
+            assert result.status == JobStatus.COMPLETED
+            assert result.result == "done"
+        finally:
+            await manager.stop()
+
+    async def test_wait_for_completion_timeout(self):
+        """wait_for_completion returns current status on timeout."""
+        manager = JobManager()
+        manager.start()
+        try:
+            job = await manager.create_job(
+                expert="architect", task="test", mode="advisory",
+                context="", files=[]
+            )
+            # Don't complete — should timeout
+            result = await manager.wait_for_completion(job.job_id, timeout=0.1)
+            assert result.status == JobStatus.PENDING
+        finally:
+            await manager.stop()
+
+    async def test_wait_for_completion_already_done(self):
+        """wait_for_completion returns instantly for completed jobs."""
+        manager = JobManager()
+        manager.start()
+        try:
+            job = await manager.create_job(
+                expert="architect", task="test", mode="advisory",
+                context="", files=[]
+            )
+            await manager.update_job(job.job_id, JobStatus.COMPLETED, result="done")
+
+            result = await manager.wait_for_completion(job.job_id, timeout=5)
+            assert result.status == JobStatus.COMPLETED
+        finally:
+            await manager.stop()

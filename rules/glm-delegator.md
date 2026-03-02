@@ -205,3 +205,15 @@ Always include previous attempt details in retry calls (stateless design).
 - Trivial bug fixes / decisions — obvious solution
 - Research/documentation — use other tools
 - Direct file operations — no external insight needed
+
+## 🚨 Validation Bloquante
+
+**RÈGLE ABSOLUE :** Si un expert retourne REJECT, **ARRÊT IMMÉDIAT**.
+
+| Expert | Bloquant Si | Action |
+|--------|-------------|--------|
+| Plan Reviewer | REJECT | Corriger plan, re-valider. Max 3 itérations puis AskUserQuestion |
+| Code Reviewer | REJECT | Corriger code, re-valider |
+| Security Analyst | CRITICAL/HIGH | Corriger vulnérabilité |
+
+**JAMAIS** ignorer un REJECT. **JAMAIS** dire "pas grave".

@@ -9,8 +9,8 @@ asyncio_mode = "auto"
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["providers", "glm_mcp_server"]
-omit = ["tests/*", ".venv/*"]
+source = ["providers", "glm_mcp_server", "server", "cli", "persona_loader", "tool_registry", "tool_handlers"]
+omit = ["tests/*", ".venv/*", "test_background_real.py"]
 
 [tool.coverage.report]
 show_missing = true

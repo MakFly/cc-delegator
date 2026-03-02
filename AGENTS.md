@@ -1,31 +1,44 @@
-<!-- codelens:start -->
-# CodeLens MCP — Tool Routing
+# AGENTS.md — AI Assistant Guide
 
-Use CodeLens MCP tools BEFORE built-in grep/glob/read. Rule: regex query → codelens_grep, natural language → codelens_search.
+## Project Overview
+MCP plugin providing GLM (glm-5) as specialized expert subagents for Claude Code.
 
-**CRITICAL:** "Find weaknesses", "project issues", "technical debt" = semantic → codelens_search or codelens_agentic_search. Do NOT use batch_grep for open-ended analysis. batch_grep = explicit regex patterns only.
+## Module Map
+| Module | Responsibility |
+|--------|---------------|
+| glm_mcp_server.py | MCP JSON-RPC protocol (stdin/stdout) |
+| server.py | DelegatorServer lifecycle, expert calls, background jobs |
+| tool_registry.py | MCP tool schema definitions |
+| tool_handlers.py | Tool handler functions + ServerServices DI |
+| persona_loader.py | Load expert prompts from prompts/personas/*.md |
+| cli.py | CLI argument parsing + logging setup |
+| providers.py | Multi-provider abstraction (OpenAI, Anthropic) |
+| cache_store.py | SQLite response cache with TTL |
+| expert_memory.py | Per-project expert learnings |
+| claude_memory_bridge.py | Bidirectional Claude Code ↔ GLM memory |
+| context_compressor.py | Smart context compression |
+| prompt_enhancer.py | LLM-based prompt improvement |
+| prompt_guard.py | Static prompt validation |
+| job_manager.py | Async background job queue |
+| cache_metrics.py | Unified metrics aggregation |
 
-## Syntactic (patterns, regex)
+## Adding a New Expert
+1. Create `prompts/personas/{name}.md` starting with `# Expert Name`
+2. Restart server — persona auto-discovered, MCP tool registered as `glm_{name}`
 
-| Task | Tool | Fallback |
-|------|------|----------|
-| Pattern/regex in code | codelens_grep | built-in grep |
-| Find files by name | codelens_list_files | built-in glob |
+## Adding a Utility Tool
+1. Add handler function in `tool_handlers.py`
+2. Add schema dict in `tool_registry.py` UTILITY_TOOLS list
+3. Add entry in `tool_handlers.UTILITY_HANDLERS` dict
 
-## Semantic (concepts, symbols)
+## Testing
+```bash
+pytest tests/ -v --cov=. --cov-report=term-missing
+```
+Coverage target: 80% (fail_under in pyproject.toml)
 
-| Task | Tool | Fallback |
-|------|------|----------|
-| Search by concept | codelens_search | grep/glob |
-| Find definitions | codelens_search (mode=symbol) | grep/glob |
-| Find usages | codelens_search (mode=refs) | grep |
-| Smart search | codelens_agentic_search | search + grep |
-
-## Context
-
-| Task | Tool |
-|------|------|
-| Project overview | codelens_overview |
-| Save memory | codelens_remember |
-| Recall memory | codelens_recall |
-<!-- codelens:end -->
+## Configuration
+| Env Var | Description |
+|---------|-------------|
+| GLM_API_KEY | Z.AI API key |
+| GLM_MODEL | Model name (default: glm-5) |

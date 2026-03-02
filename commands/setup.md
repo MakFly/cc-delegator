@@ -9,6 +9,21 @@ timeout: 60000
 
 Configure GLM (4.7/5) as specialized expert subagents via MCP. Five domain experts that can advise OR implement.
 
+## Flags
+- `--non-interactive` or `-y`: Skip all prompts, use defaults
+- `--api-key KEY`: Pass API key directly (skip env check)
+- `--model MODEL`: Override default model (default: glm-5)
+- `--no-rules`: Skip rule file installation
+
+## Exit Codes
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Missing dependencies |
+| 2 | Missing API key |
+| 3 | Config write error |
+| 4 | User cancelled |
+
 ## Step 1: Check Python and Dependencies
 
 ```bash

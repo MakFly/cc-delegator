@@ -2,6 +2,8 @@
 
 import argparse
 import logging
+import os
+import tempfile
 
 import httpx
 import pytest
@@ -100,3 +102,17 @@ def mock_args():
 def mock_logger():
     """A logger instance for tests."""
     return logging.getLogger("test-glm-delegator")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cache_and_memory(tmp_path, monkeypatch):
+    """Redirect cache and memory to tmp_path so tests don't pollute ~/.glm/."""
+    import cache_store
+    import expert_memory
+
+    # Override the default db_path calculation: when db_path is None (default),
+    # ResponseCache.__init__ builds the path from Path.home(). We patch HOME.
+    fake_home = str(tmp_path / "fakehome")
+    monkeypatch.setenv("HOME", fake_home)
+    # Also patch Path.home for robustness
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "fakehome")

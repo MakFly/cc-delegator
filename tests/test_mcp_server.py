@@ -35,10 +35,10 @@ class TestExpertPrompts:
 
 class TestListTools:
 
-    async def test_returns_ten_tools(self, mock_args, mock_logger):
+    async def test_returns_eleven_tools(self, mock_args, mock_logger):
         srv = LLMDelegatorMCPServer(mock_args, mock_logger)
         result = await srv.list_tools()
-        assert len(result["tools"]) == 10
+        assert len(result["tools"]) == 11
 
     async def test_expected_tool_names(self, mock_args, mock_logger):
         srv = LLMDelegatorMCPServer(mock_args, mock_logger)
@@ -55,6 +55,7 @@ class TestListTools:
             "glm_route",
             "glm_workflow",
             "glm_get_job_result",
+            "glm_cache_stats",
         }
 
     async def test_names_prefixed_glm(self, mock_args, mock_logger):
@@ -211,37 +212,43 @@ class TestCallTool:
         user_prompt = call_args.kwargs.get("user_prompt") or call_args.args[1]
         assert "ADVISORY" in user_prompt
 
-    async def test_call_tool_rejects_too_many_files(self, mock_args, mock_logger):
-        """Timeout protection: reject when files > MAX_FILES_COUNT."""
+    async def test_call_tool_routes_many_files_to_background(self, mock_args, mock_logger):
+        """Too many files for direct call are routed to background mode."""
         srv = self._server(mock_args, mock_logger)
 
-        # 6 files > MAX_FILES_COUNT (5)
-        files = [f"file{i}.ts" for i in range(6)]
+        # 11 files > MAX_FILES_COUNT (10) → background job
+        files = [f"file{i}.ts" for i in range(11)]
         result = await srv.call_tool("glm_architect", {
             "task": "review",
             "files": files
         })
 
-        assert result["isError"] is True
-        error_data = json.loads(result["content"][0]["text"])
-        assert error_data["error"] == "context_too_large"
-        assert "Too many files" in error_data["message"]
+        assert "isError" not in result
+        response_data = json.loads(result["content"][0]["text"])
+        assert "job_id" in response_data
+        assert response_data["status"] == "pending"
 
-    async def test_call_tool_rejects_large_context(self, mock_args, mock_logger):
-        """Timeout protection: reject when context > MAX_CONTEXT_CHARS."""
+    async def test_call_tool_routes_large_context_to_background(self, mock_args, mock_logger):
+        """Large context is routed to background mode instead of being rejected."""
         srv = self._server(mock_args, mock_logger)
 
-        # Context larger than MAX_CONTEXT_CHARS (15000)
+        # Bypass compressor so the raw 20K context reaches routing logic
+        from context_compressor import CompressionResult
+        async def _passthrough(ctx, target=None):
+            return ctx, CompressionResult(len(ctx), len(ctx), "none", 0)
+        srv.compressor.compress = _passthrough
+
+        # Context larger than MAX_CONTEXT_CHARS (15000) → background job
         large_context = "x" * 20000
         result = await srv.call_tool("glm_architect", {
             "task": "review",
             "context": large_context
         })
 
-        assert result["isError"] is True
-        error_data = json.loads(result["content"][0]["text"])
-        assert error_data["error"] == "context_too_large"
-        assert "Context too large" in error_data["message"]
+        assert "isError" not in result
+        response_data = json.loads(result["content"][0]["text"])
+        assert "job_id" in response_data
+        assert response_data["status"] == "pending"
 
     async def test_call_tool_accepts_valid_context(self, mock_args, mock_logger):
         """Timeout protection: accept when context is within limits."""
@@ -403,7 +410,7 @@ class TestBackgroundMode:
         return srv
 
     def test_should_use_background_mode_small_context(self, mock_args, mock_logger):
-        """Small context (< 8000 chars) should use direct mode."""
+        """Small context (< 12000 chars) should use direct mode."""
         srv = self._server(mock_args, mock_logger)
 
         result = srv._should_use_background_mode(
@@ -415,11 +422,11 @@ class TestBackgroundMode:
         assert result is False
 
     def test_should_use_background_mode_large_context(self, mock_args, mock_logger):
-        """Large context (>= 8000 chars) should use background mode."""
+        """Large context (>= 12000 chars) should use background mode."""
         srv = self._server(mock_args, mock_logger)
 
-        # Create context >= 8000 chars
-        large_context = "x" * 8000
+        # Create context >= 12000 chars
+        large_context = "x" * 12000
 
         result = srv._should_use_background_mode(
             task="task",
@@ -433,18 +440,18 @@ class TestBackgroundMode:
         """Test exact threshold boundary."""
         srv = self._server(mock_args, mock_logger)
 
-        # Task of 1000 chars + context of 6999 chars = 7999 (just under)
+        # Task of 1000 chars + context of 10999 chars = 11999 (just under)
         result = srv._should_use_background_mode(
             task="x" * 1000,
-            context="y" * 6999,
+            context="y" * 10999,
             files=[]
         )
         assert result is False
 
-        # Task of 1000 chars + context of 7000 chars = 8000 (at threshold)
+        # Task of 1000 chars + context of 11000 chars = 12000 (at threshold)
         result = srv._should_use_background_mode(
             task="x" * 1000,
-            context="y" * 7000,
+            context="y" * 11000,
             files=[]
         )
         assert result is True
@@ -456,8 +463,14 @@ class TestBackgroundMode:
             return_value=ProviderResponse(text="expert reply", raw={}, model="m")
         )
 
-        # Create context >= 8000 chars
-        large_context = "x" * 9000
+        # Bypass compressor so the raw 13K context reaches routing logic
+        from context_compressor import CompressionResult
+        async def _passthrough(ctx, target=None):
+            return ctx, CompressionResult(len(ctx), len(ctx), "none", 0)
+        srv.compressor.compress = _passthrough
+
+        # Create context >= 12000 chars
+        large_context = "x" * 13000
 
         result = await srv.call_tool("glm_architect", {
             "task": "review",
@@ -586,3 +599,208 @@ class TestBackgroundMode:
         response_data = json.loads(result["content"][0]["text"])
         assert response_data["status"] == "failed"
         assert "Something went wrong" in response_data["error"]
+
+    async def test_get_job_result_long_poll_completed(self, mock_args, mock_logger):
+        """wait=true returns completed once job finishes."""
+        srv = self._server(mock_args, mock_logger)
+
+        job = await srv.job_manager.create_job(
+            expert="architect",
+            task="test task",
+            mode="advisory",
+            context="",
+            files=[]
+        )
+        from job_manager import JobStatus
+        # Complete the job before calling (simulates fast completion)
+        await srv.job_manager.update_job(
+            job.job_id,
+            JobStatus.COMPLETED,
+            result="Done"
+        )
+
+        result = await srv.call_tool("glm_get_job_result", {
+            "job_id": job.job_id,
+            "wait": True,
+            "timeout": 5
+        })
+
+        response_data = json.loads(result["content"][0]["text"])
+        assert response_data["status"] == "completed"
+        assert response_data["result"] == "Done"
+
+    async def test_get_job_result_long_poll_timeout(self, mock_args, mock_logger):
+        """wait=true returns current status when timeout expires."""
+        srv = self._server(mock_args, mock_logger)
+
+        job = await srv.job_manager.create_job(
+            expert="architect",
+            task="test task",
+            mode="advisory",
+            context="",
+            files=[]
+        )
+        # Job stays pending — timeout should fire quickly
+
+        result = await srv.call_tool("glm_get_job_result", {
+            "job_id": job.job_id,
+            "wait": True,
+            "timeout": 1
+        })
+
+        response_data = json.loads(result["content"][0]["text"])
+        assert response_data["status"] == "pending"
+
+    async def test_get_job_result_no_wait(self, mock_args, mock_logger):
+        """wait=false returns immediately without blocking."""
+        srv = self._server(mock_args, mock_logger)
+
+        job = await srv.job_manager.create_job(
+            expert="architect",
+            task="test task",
+            mode="advisory",
+            context="",
+            files=[]
+        )
+
+        result = await srv.call_tool("glm_get_job_result", {
+            "job_id": job.job_id,
+            "wait": False
+        })
+
+        response_data = json.loads(result["content"][0]["text"])
+        assert response_data["status"] == "pending"
+
+
+# ============================================================================
+# CACHE & MEMORY INTEGRATION
+# ============================================================================
+
+class TestCacheIntegration:
+
+    def _server(self, mock_args, mock_logger):
+        srv = LLMDelegatorMCPServer(mock_args, mock_logger)
+        srv.provider = AsyncMock()
+        return srv
+
+    async def test_call_expert_caches_response(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="cached reply", raw={}, model="m", tokens_used=50)
+        )
+
+        # First call — provider called
+        result1 = await srv.call_expert("architect", "design X")
+        assert srv.provider.call.call_count == 1
+        assert result1 == "cached reply"
+
+        # Second call — served from cache, provider NOT called
+        result2 = await srv.call_expert("architect", "design X")
+        assert srv.provider.call.call_count == 1  # Still 1
+        assert result2 == "cached reply"
+
+    async def test_call_expert_different_context_misses_cache(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="reply", raw={}, model="m")
+        )
+
+        await srv.call_expert("architect", "task", context="ctx1")
+        await srv.call_expert("architect", "task", context="ctx2")
+        assert srv.provider.call.call_count == 2
+
+    async def test_call_expert_records_miss_stat(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="reply", raw={}, model="m")
+        )
+
+        await srv.call_expert("architect", "task")
+        stats = srv.response_cache.get_stats(hours=1)
+        assert stats["events"].get("miss", {}).get("count", 0) == 1
+
+    async def test_call_expert_records_hit_stat(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="reply", raw={}, model="m", tokens_used=100)
+        )
+
+        await srv.call_expert("architect", "task")
+        await srv.call_expert("architect", "task")  # Cache hit
+        stats = srv.response_cache.get_stats(hours=1)
+        assert stats["events"].get("hit", {}).get("count", 0) == 1
+
+    async def test_memory_injection_with_working_dir(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="reply", raw={}, model="m")
+        )
+
+        # Pre-populate memory
+        from expert_memory import project_id_from_dir
+        pid = project_id_from_dir("/my/project")
+        srv.expert_memory.append(pid, "architect", "Always use dependency injection")
+
+        await srv.call_expert("architect", "new task", working_dir="/my/project")
+
+        # Verify the prompt includes the memory
+        call_args = srv.provider.call.call_args
+        user_prompt = call_args.kwargs.get("user_prompt") or call_args.args[1]
+        assert "PRIOR LEARNINGS" in user_prompt
+        assert "dependency injection" in user_prompt
+
+    async def test_learning_extraction_after_call(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(
+                text="Analysis complete.\nRecommendation: Use event-driven architecture for scalability.",
+                raw={}, model="m",
+            )
+        )
+
+        from expert_memory import project_id_from_dir
+        await srv.call_expert("architect", "design system", working_dir="/my/project")
+
+        pid = project_id_from_dir("/my/project")
+        content = srv.expert_memory.load(pid, "architect")
+        assert "event-driven architecture" in content
+
+
+class TestCacheStatsTool:
+
+    def _server(self, mock_args, mock_logger):
+        srv = LLMDelegatorMCPServer(mock_args, mock_logger)
+        srv.provider = AsyncMock()
+        return srv
+
+    async def test_cache_stats_tool_returns_report(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        result = await srv.call_tool("glm_cache_stats", {"action": "stats"})
+        data = json.loads(result["content"][0]["text"])
+        assert "prompt_cache" in data
+        assert "response_cache" in data
+        assert "expert_memory" in data
+
+    async def test_cache_stats_invalidate_expert(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        srv.provider.call = AsyncMock(
+            return_value=ProviderResponse(text="resp", raw={}, model="m")
+        )
+
+        # Populate cache
+        await srv.call_expert("architect", "task1")
+
+        # Invalidate
+        result = await srv.call_tool("glm_cache_stats", {
+            "action": "invalidate_expert",
+            "expert": "architect"
+        })
+        data = json.loads(result["content"][0]["text"])
+        assert data["entries_removed"] == 1
+
+    async def test_cache_stats_invalidate_missing_expert(self, mock_args, mock_logger):
+        srv = self._server(mock_args, mock_logger)
+        result = await srv.call_tool("glm_cache_stats", {
+            "action": "invalidate_expert"
+        })
+        assert result["isError"] is True

@@ -82,6 +82,7 @@ class JobManager:
         self.max_jobs = max_jobs
         self.retention_hours = retention_hours
         self._jobs: dict[str, Job] = {}
+        self._events: dict[str, asyncio.Event] = {}  # Notifies waiters on status change
         self._cleanup_task: Optional[asyncio.Task] = None
         self._running = False
         self.logger = logging.getLogger("llm-delegator.jobs")
@@ -143,11 +144,23 @@ class JobManager:
         )
 
         self._jobs[job.job_id] = job
+        self._events[job.job_id] = asyncio.Event()
         self.logger.info(f"Job created: {job.job_id} (expert={expert}, total_jobs={len(self._jobs)})")
         return job
 
     async def get_job(self, job_id: str) -> Optional[Job]:
         """Récupère un job par ID. Retourne None si non trouvé."""
+        return self._jobs.get(job_id)
+
+    async def wait_for_completion(self, job_id: str, timeout: float = 55) -> Optional[Job]:
+        """Wait until job reaches a terminal state. Returns job or None on timeout."""
+        event = self._events.get(job_id)
+        if not event:
+            return self._jobs.get(job_id)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
         return self._jobs.get(job_id)
 
     async def update_job(
@@ -174,6 +187,12 @@ class JobManager:
             job.result = result
         if error is not None:
             job.error = error
+
+        # Signal waiters when job reaches a terminal state
+        if status not in (JobStatus.PENDING, JobStatus.PROCESSING):
+            event = self._events.get(job_id)
+            if event:
+                event.set()
 
         self.logger.info(f"Job updated: {job_id} -> {status.value}")
 
@@ -212,6 +231,7 @@ class JobManager:
 
         for job_id in jobs_to_remove:
             del self._jobs[job_id]
+            self._events.pop(job_id, None)
             self.logger.info(f"Job removed (expired): {job_id}")
 
         for job_id in jobs_to_timeout:

@@ -452,7 +452,12 @@ class TestAnthropicCompatibleProvider:
         await p.call("sys prompt", "user prompt")
 
         body = captured["body"]
-        assert body["system"] == "sys prompt"
+        # System prompt is sent as content blocks with cache_control
+        assert body["system"] == [{
+            "type": "text",
+            "text": "sys prompt",
+            "cache_control": {"type": "ephemeral"}
+        }]
         assert body["messages"] == [{"role": "user", "content": "user prompt"}]
         assert body["model"] == "test-model"
         assert body["max_tokens"] == 1024
@@ -686,3 +691,92 @@ class TestConfigLoader:
         })
         profiles = ConfigLoader.list_profiles(config_path=path)
         assert set(profiles.keys()) == {"a", "b"}
+
+
+# ============================================================================
+# PROMPT CACHING (AnthropicCompatibleProvider)
+# ============================================================================
+
+class TestAnthropicPromptCaching:
+
+    def _make(self, make_backend_config, monkeypatch):
+        monkeypatch.setenv("TEST_API_KEY", "test-key")
+        config = make_backend_config(provider="anthropic-compatible")
+        return AnthropicCompatibleProvider(config)
+
+    async def test_cache_metrics_extracted(self, make_backend_config, monkeypatch):
+        p = self._make(make_backend_config, monkeypatch)
+        await p.start()
+
+        body = {
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "m",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_creation_input_tokens": 80,
+                "cache_read_input_tokens": 0,
+            },
+        }
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, json=body))
+        p._client = httpx.AsyncClient(transport=transport, base_url=p.config.baseUrl)
+
+        resp = await p.call("sys", "user")
+        assert resp.cache_creation_tokens == 80
+        assert resp.cache_read_tokens == 0
+        assert resp.tokens_used == 150
+        await p.stop()
+
+    async def test_cache_read_tokens_on_hit(self, make_backend_config, monkeypatch):
+        p = self._make(make_backend_config, monkeypatch)
+        await p.start()
+
+        body = {
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "m",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 80,
+            },
+        }
+        transport = httpx.MockTransport(lambda req: httpx.Response(200, json=body))
+        p._client = httpx.AsyncClient(transport=transport, base_url=p.config.baseUrl)
+
+        resp = await p.call("sys", "user")
+        assert resp.cache_read_tokens == 80
+        assert p._caching_supported is True
+        await p.stop()
+
+    async def test_caching_fallback_on_error(self, make_backend_config, monkeypatch):
+        """If cache_control causes an error, fallback to plain string."""
+        p = self._make(make_backend_config, monkeypatch)
+        await p.start()
+
+        call_count = 0
+        success_body = {
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "m",
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        }
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            body = json.loads(req.content)
+            if isinstance(body.get("system"), list):
+                # Reject cache_control
+                return httpx.Response(
+                    400,
+                    json={"error": {"message": "cache_control not supported"}},
+                )
+            return httpx.Response(200, json=success_body)
+
+        p._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=p.config.baseUrl)
+
+        resp = await p.call("sys", "user")
+        assert resp.text == "ok"
+        assert p._caching_supported is False
+        # Should have made 2 calls: first with cache_control (failed), then without
+        assert call_count == 2
+        await p.stop()

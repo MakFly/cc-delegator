@@ -67,6 +67,8 @@ class ProviderResponse:
     raw: Dict[str, Any]
     model: str
     tokens_used: Optional[int] = None
+    cache_creation_tokens: Optional[int] = None  # Anthropic prompt cache: tokens written
+    cache_read_tokens: Optional[int] = None       # Anthropic prompt cache: tokens read (hits)
 
 
 # =============================================================================
@@ -247,7 +249,17 @@ class AnthropicCompatibleProvider(BaseProvider):
 
     Supports: Anthropic, Z.AI, etc.
     API format: /v1/messages
+
+    Prompt caching: automatically sends system prompts as content blocks with
+    ``cache_control: {"type": "ephemeral"}`` so the Anthropic backend can
+    cache them across calls.  Falls back to plain string if the API rejects
+    the cache_control field (e.g. Z.AI proxy without caching support).
     """
+
+    def __init__(self, config: BackendConfig):
+        super().__init__(config)
+        # None = untested, True = works, False = not supported
+        self._caching_supported: Optional[bool] = None
 
     def _build_headers(self) -> Dict[str, str]:
         headers = {
@@ -257,6 +269,16 @@ class AnthropicCompatibleProvider(BaseProvider):
         if self.api_key:
             headers["x-api-key"] = self.api_key
         return headers
+
+    def _build_system_payload(self, system_prompt: str):
+        """Build system field — content blocks with caching or plain string."""
+        if self._caching_supported is not False:
+            return [{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"}
+            }]
+        return system_prompt
 
     async def call(
         self,
@@ -270,10 +292,12 @@ class AnthropicCompatibleProvider(BaseProvider):
 
         self._validate_api_key()
 
+        system_payload = self._build_system_payload(system_prompt)
+
         payload = {
             "model": self.config.model,
             "max_tokens": self.config.maxTokens,
-            "system": system_prompt,
+            "system": system_payload,
             "messages": [
                 {"role": "user", "content": user_prompt}
             ]
@@ -293,6 +317,11 @@ class AnthropicCompatibleProvider(BaseProvider):
             )
             data = response.json()
 
+            # Mark caching as supported on first success with content blocks
+            if self._caching_supported is None and isinstance(system_payload, list):
+                self._caching_supported = True
+                logger.info("Prompt caching confirmed supported")
+
             # Extract response text
             text = data["content"][0]["text"]
             usage = data.get("usage", {})
@@ -300,15 +329,56 @@ class AnthropicCompatibleProvider(BaseProvider):
             output_t = usage.get("output_tokens") or 0
             tokens_used = input_t + output_t
 
+            # Prompt cache metrics (Anthropic-specific)
+            cache_creation = usage.get("cache_creation_input_tokens")
+            cache_read = usage.get("cache_read_input_tokens")
+
+            if cache_creation or cache_read:
+                logger.debug(
+                    f"Prompt cache: creation={cache_creation or 0}, "
+                    f"read={cache_read or 0}"
+                )
+
             return ProviderResponse(
                 text=text,
                 raw=data,
                 model=data.get("model", self.config.model),
-                tokens_used=tokens_used
+                tokens_used=tokens_used,
+                cache_creation_tokens=cache_creation,
+                cache_read_tokens=cache_read,
             )
 
         except httpx.HTTPStatusError as e:
             error_body = e.response.text[:200]
+
+            # Fallback: if cache_control caused the error, retry without it
+            if (
+                self._caching_supported is None
+                and isinstance(system_payload, list)
+                and "cache_control" in error_body.lower()
+            ):
+                logger.warning("Prompt caching not supported, falling back to plain system prompt")
+                self._caching_supported = False
+                payload["system"] = system_prompt
+                try:
+                    response = await self._call_with_retry(
+                        lambda: self._client.post("/v1/messages", json=payload)
+                    )
+                    data = response.json()
+                    text = data["content"][0]["text"]
+                    usage = data.get("usage", {})
+                    input_t = usage.get("input_tokens") or 0
+                    output_t = usage.get("output_tokens") or 0
+                    return ProviderResponse(
+                        text=text,
+                        raw=data,
+                        model=data.get("model", self.config.model),
+                        tokens_used=input_t + output_t,
+                    )
+                except Exception as fallback_err:
+                    logger.error(f"Fallback also failed: {fallback_err}")
+                    raise RuntimeError(f"API error after cache fallback: {fallback_err}")
+
             logger.error(f"Anthropic-compatible API error: {e.response.status_code} - {error_body}")
             if e.response.status_code == 429:
                 raise RuntimeError("Rate limit exceeded or insufficient credits.")
